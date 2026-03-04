@@ -147,12 +147,40 @@ Next day                 →  Re-download fresh copy
 
 ---
 
-## Rate Limits
+## Dhan API Rate Limits
 
-Dhan Market Feed API allows **1 request per second**.
-The app makes **1 OHLC request every 5 seconds** — well within limits.
+> Source: [dhanhq.co/docs/v2](https://dhanhq.co/docs/v2/)
 
-Historical API calls at startup are staggered **400ms apart** to avoid rate limit errors.
+### Official Limits by Endpoint Category
+
+| Category | Per Second | Per Minute | Per Hour | Per Day |
+|---|---|---|---|---|
+| **Quote APIs** (marketfeed/ltp, ohlc, quotes) | **1 req/sec** | Unlimited | Unlimited | Unlimited |
+| **Data APIs** (charts/intraday, charts/historical) | **5 req/sec** | — | — | 100,000/day |
+| **Order APIs** | 10 req/sec | 250 | 1,000 | 7,000 |
+| **Non-Trading APIs** | 20 req/sec | Unlimited | Unlimited | Unlimited |
+| Order Modifications | — | — | — | Max 25/order |
+
+### How This App Handles Rate Limits
+
+| Action | API Used | Frequency | Within Limit? |
+|---|---|---|---|
+| Live price polling | `POST /v2/marketfeed/ohlc` (Quote API) | Every 5 seconds | ✅ (limit: 1/sec) |
+| Prev close at startup | `POST /v2/charts/historical` (Data API) | Staggered 400ms apart | ✅ (limit: 5/sec) |
+| Intraday chart load | `POST /v2/charts/intraday` (Data API) | On demand (user tap) | ✅ (limit: 5/sec) |
+
+### WebSocket Alternative (Future Improvement)
+
+Dhan provides a **Live Market Feed via WebSocket** which is far more efficient than polling:
+- Up to **5 WebSocket connections** per user
+- Up to **5,000 instruments per connection**
+- Max **100 instruments per subscription message**
+- Supports 3 modes: **Ticker** (LTP only), **Quote** (OHLC + volume), **Full** (market depth)
+- Includes **Previous Day Close** in all modes — no separate historical call needed
+- Server sends **ping every 10 seconds**; connection closes if no pong within 40 seconds
+- Endpoint: `wss://api-feed.dhan.co?version=2&token=<token>&clientId=<id>&authType=2`
+
+> **Note:** Switching to WebSocket would eliminate the 5-second polling delay, remove rate limit concerns entirely, and provide true tick-by-tick data. This is the recommended upgrade path for this app.
 
 ---
 
