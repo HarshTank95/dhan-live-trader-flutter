@@ -2,6 +2,19 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'scrip_service.dart';
 
+// Typed exceptions for better error handling in UI
+class DhanAuthException implements Exception {
+  final String message;
+  DhanAuthException(this.message);
+}
+
+class DhanRateLimitException implements Exception {}
+
+class DhanNetworkException implements Exception {
+  final String message;
+  DhanNetworkException(this.message);
+}
+
 class StockQuote {
   final String symbol;
   final String name;
@@ -82,14 +95,17 @@ class DhanService {
         body: jsonEncode({'NSE_EQ': securityIds}),
       );
     } catch (e) {
-      throw Exception('Network error: $e');
+      throw DhanNetworkException('No internet connection or server unreachable');
     }
 
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      throw DhanAuthException('Access token expired or invalid. Please update your credentials.');
+    }
     if (response.statusCode == 429) {
-      throw Exception('Rate limit — please wait');
+      throw DhanRateLimitException();
     }
     if (response.statusCode != 200) {
-      throw Exception('API ${response.statusCode}: ${response.body}');
+      throw Exception('API error (${response.statusCode})');
     }
 
     final json = jsonDecode(response.body);

@@ -2,7 +2,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../main.dart';
 import '../models/watchlist_model.dart';
-import '../services/dhan_service.dart';
+import '../services/dhan_service.dart'
+    show DhanService, DhanAuthException, DhanRateLimitException, DhanNetworkException, StockQuote;
 import '../services/scrip_service.dart';
 import '../services/storage_service.dart';
 import 'token_entry_screen.dart';
@@ -34,6 +35,9 @@ class _LtpScreenState extends State<LtpScreen> {
   bool _isLoading = true;
   bool _isLoadingScrips = true;
   String? _error;
+  bool _isAuthError = false;
+  bool _isNetworkError = false;
+  bool _isRateLimitError = false;
   Timer? _timer;
   DateTime? _lastUpdated;
   SortMode _sortMode = SortMode.changeDesc;
@@ -109,12 +113,42 @@ class _LtpScreenState extends State<LtpScreen> {
         _quotes = _sorted(quotes);
         _isLoading = false;
         _error = null;
+        _isAuthError = false;
+        _isNetworkError = false;
+        _isRateLimitError = false;
         _lastUpdated = DateTime.now();
+      });
+    } on DhanAuthException catch (e) {
+      setState(() {
+        _isLoading = false;
+        _error = e.message;
+        _isAuthError = true;
+        _isNetworkError = false;
+        _isRateLimitError = false;
+      });
+    } on DhanNetworkException catch (e) {
+      setState(() {
+        _isLoading = false;
+        _error = e.message;
+        _isAuthError = false;
+        _isNetworkError = true;
+        _isRateLimitError = false;
+      });
+    } on DhanRateLimitException {
+      setState(() {
+        _isLoading = false;
+        _error = 'Too many requests. The app will retry automatically.';
+        _isAuthError = false;
+        _isNetworkError = false;
+        _isRateLimitError = true;
       });
     } catch (e) {
       setState(() {
         _isLoading = false;
         _error = e.toString();
+        _isAuthError = false;
+        _isNetworkError = false;
+        _isRateLimitError = false;
       });
     }
   }
@@ -336,7 +370,7 @@ class _LtpScreenState extends State<LtpScreen> {
     final now =
         DateTime.now().toUtc().add(const Duration(hours: 5, minutes: 30));
     if (now.weekday == DateTime.saturday ||
-        now.weekday == DateTime.sunday) return false;
+        now.weekday == DateTime.sunday) { return false; }
     final open = DateTime(now.year, now.month, now.day, 9, 15);
     final close = DateTime(now.year, now.month, now.day, 15, 30);
     return now.isAfter(open) && now.isBefore(close);
@@ -692,38 +726,77 @@ class _LtpScreenState extends State<LtpScreen> {
     }
 
     if (_error != null) {
+      final icon = _isAuthError
+          ? Icons.lock_outline
+          : _isNetworkError
+              ? Icons.wifi_off_rounded
+              : _isRateLimitError
+                  ? Icons.hourglass_empty_rounded
+                  : Icons.error_outline;
+      final iconColor = _isRateLimitError ? Colors.orange : Colors.red;
+      final title = _isAuthError
+          ? 'Token Expired'
+          : _isNetworkError
+              ? 'No Connection'
+              : _isRateLimitError
+                  ? 'Rate Limited'
+                  : 'Something Went Wrong';
+
       return ListView(children: [
         SizedBox(
-          height: 400,
+          height: 420,
           child: Center(
             child: Padding(
               padding: const EdgeInsets.all(24),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Icon(Icons.error_outline,
-                      size: 56, color: Colors.red),
-                  const SizedBox(height: 16),
-                  const Text('Failed to fetch prices',
-                      style: TextStyle(
-                          fontSize: 18, fontWeight: FontWeight.bold)),
+                  Container(
+                    width: 80, height: 80,
+                    decoration: BoxDecoration(
+                      color: iconColor.withOpacity(0.1),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(icon, size: 40, color: iconColor),
+                  ),
+                  const SizedBox(height: 20),
+                  Text(title,
+                      style: const TextStyle(
+                          fontSize: 20, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
                   Text(_error!,
                       textAlign: TextAlign.center,
                       style: const TextStyle(
-                          color: Colors.grey, fontSize: 12)),
-                  const SizedBox(height: 24),
-                  ElevatedButton.icon(
-                    onPressed: () {
-                      setState(() {
-                        _isLoading = true;
-                        _error = null;
-                      });
-                      _fetchLTP();
-                    },
-                    icon: const Icon(Icons.refresh),
-                    label: const Text('Retry'),
-                  ),
+                          color: Colors.grey, fontSize: 13)),
+                  const SizedBox(height: 28),
+                  if (_isAuthError)
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 24, vertical: 12),
+                      ),
+                      onPressed: _openEditCredentials,
+                      icon: const Icon(Icons.manage_accounts_outlined),
+                      label: const Text('Update Token'),
+                    )
+                  else
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 24, vertical: 12),
+                      ),
+                      onPressed: () {
+                        setState(() {
+                          _isLoading = true;
+                          _error = null;
+                        });
+                        _fetchLTP();
+                      },
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Retry'),
+                    ),
                 ],
               ),
             ),
