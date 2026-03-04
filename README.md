@@ -163,11 +163,40 @@ Next day                 →  Re-download fresh copy
 
 ### How This App Handles Rate Limits
 
-| Action | API Used | Frequency | Within Limit? |
+| Action | API Used | Category | Frequency |
 |---|---|---|---|
-| Live price polling | `POST /v2/marketfeed/ohlc` (Quote API) | Every 5 seconds | ✅ (limit: 1/sec) |
-| Prev close at startup | `POST /v2/charts/historical` (Data API) | Staggered 400ms apart | ✅ (limit: 5/sec) |
-| Intraday chart load | `POST /v2/charts/intraday` (Data API) | On demand (user tap) | ✅ (limit: 5/sec) |
+| Live price polling | `POST /v2/marketfeed/ohlc` | Quote | Every 5 seconds |
+| Prev close at startup | `POST /v2/charts/historical` | Data | On startup per stock |
+| Intraday chart load | `POST /v2/charts/intraday` | Data | On demand (user tap) |
+
+### Centralized Rate Limiter (`lib/services/rate_limiter.dart`)
+
+The app uses a **centralized watchman** — a `RateLimiter` singleton that every API call must pass through before hitting Dhan's servers. This prevents 429 errors entirely.
+
+**How it works:**
+- Uses a **sliding window algorithm** — tracks timestamps of recent requests per category
+- If a call would exceed the per-second limit, it **automatically waits** the exact milliseconds needed, then proceeds
+- If the daily limit is hit, it throws a `RateLimitDailyException` with a clear message
+- No manual `Future.delayed` scattered across the code — the limiter handles all spacing
+
+**Usage in code:**
+```dart
+// Before every API call in DhanService:
+await RateLimiter.instance.acquire(ApiCategory.quote); // for marketfeed/*
+await RateLimiter.instance.acquire(ApiCategory.data);  // for charts/*
+```
+
+**Monitor current usage at runtime:**
+```dart
+final stats = RateLimiter.instance.stats;
+// e.g. "Quote: 144 today | Data: 30/100000 today (0.0%)"
+print(stats);
+```
+
+**Reset (useful for testing):**
+```dart
+RateLimiter.instance.reset();
+```
 
 ### WebSocket Alternative (Future Improvement)
 
@@ -261,7 +290,7 @@ Credentials are stored using `shared_preferences`, which saves to a plain-text X
 The scrip master CSV contains ~80,000+ rows. Parsing and searching is done in-memory. On low-end devices, the initial load may be slow. A future improvement would be to move parsing to an isolate or use a local SQLite database.
 
 ### No Background Refresh
-Prices only update while the app is in the foreground. There is no background service or push notification for price alerts. This is intentional (to stay within rate limits) but limits real-time monitoring use cases.
+Prices only update while the app is in the foreground. There is no background service or push notification for price alerts. This is intentional (to stay within rate limits) but limits real-time monitoring use cases. The `RateLimiter` daily counter also resets on app restart — for true daily tracking, counts should be persisted to `shared_preferences`.
 
 ### Historical API on Weekends
 When the app is opened on a weekend, the historical API returns data through Friday. This works correctly, but the "previous close" is technically 2+ days old. Consider labeling the % change as "vs Fri Close" on weekends.

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:candlesticks/candlesticks.dart';
+import 'rate_limiter.dart';
 import 'scrip_service.dart';
 
 // Typed exceptions for better error handling in UI
@@ -69,10 +70,10 @@ class DhanService {
     for (final stock in _watchlist) {
       if (_prevCloses.containsKey(stock.securityId)) continue;
       try {
+        // Rate limiter handles spacing — no need for manual delay
         final close = await _fetchDayClose(
             stock.securityId.toString(), _fmt(fromDate), _fmt(toDate));
         if (close > 0) _prevCloses[stock.securityId] = close;
-        await Future.delayed(const Duration(milliseconds: 400));
       } catch (_) {}
     }
   }
@@ -80,6 +81,9 @@ class DhanService {
   // ── Live OHLC fetch every 5 seconds ─────────────────────────────────
   Future<List<StockQuote>> fetchLTP() async {
     if (_watchlist.isEmpty) return [];
+
+    // Watchman: enforce Quote API rate limit (1 req/sec)
+    await RateLimiter.instance.acquire(ApiCategory.quote);
 
     final securityIds = _watchlist.map((s) => s.securityId).toList();
 
@@ -132,6 +136,9 @@ class DhanService {
   // ── Historical daily close ───────────────────────────────────────────
   Future<double> _fetchDayClose(
       String securityId, String fromDate, String toDate) async {
+    // Watchman: enforce Data API rate limit (5 req/sec, 100k/day)
+    await RateLimiter.instance.acquire(ApiCategory.data);
+
     final response = await http.post(
       Uri.parse('$_baseUrl/v2/charts/historical'),
       headers: {
@@ -160,6 +167,9 @@ class DhanService {
 
   // ── Intraday candles (today, minute intervals) ───────────────────────
   Future<List<Candle>> fetchIntraday(int securityId, String interval) async {
+    // Watchman: enforce Data API rate limit (5 req/sec, 100k/day)
+    await RateLimiter.instance.acquire(ApiCategory.data);
+
     final today = _fmt(DateTime.now());
     http.Response response;
     try {
@@ -197,6 +207,9 @@ class DhanService {
   // ── Historical daily candles ─────────────────────────────────────────
   Future<List<Candle>> fetchHistoricalDailyCandles(
       int securityId, int days) async {
+    // Watchman: enforce Data API rate limit (5 req/sec, 100k/day)
+    await RateLimiter.instance.acquire(ApiCategory.data);
+
     final toDate = DateTime.now().subtract(const Duration(days: 1));
     final fromDate = DateTime.now().subtract(Duration(days: days));
 
