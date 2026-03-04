@@ -6,6 +6,7 @@ import '../services/dhan_service.dart'
     show DhanService, DhanAuthException, DhanRateLimitException, DhanNetworkException, StockQuote;
 import '../services/scrip_service.dart';
 import '../services/storage_service.dart';
+import 'chart_screen.dart';
 import 'token_entry_screen.dart';
 import 'watchlist_manager_screen.dart';
 
@@ -316,9 +317,29 @@ class _LtpScreenState extends State<LtpScreen> {
                     color: Colors.green),
                 _detailTile('Low', '₹${q.low.toStringAsFixed(2)}',
                     color: Colors.red),
-                _detailTile(
-                    'Prev Close', '₹${q.prevClose.toStringAsFixed(2)}'),
+                _detailTile('Prev Close', '₹${q.prevClose.toStringAsFixed(2)}'),
               ],
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                ),
+                onPressed: () {
+                  Navigator.pop(context); // close bottom sheet
+                  _openChart(q);
+                },
+                icon: const Icon(Icons.candlestick_chart_outlined),
+                label: const Text('View Chart',
+                    style: TextStyle(
+                        fontSize: 15, fontWeight: FontWeight.w600)),
+              ),
             ),
             const SizedBox(height: 8),
           ],
@@ -327,12 +348,37 @@ class _LtpScreenState extends State<LtpScreen> {
     );
   }
 
+  void _openChart(StockQuote q) {
+    _timer?.cancel();
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ChartScreen(
+          securityId: q.securityId,
+          symbol: q.symbol,
+          name: q.name,
+          ltp: q.ltp,
+          change: q.change,
+          changePercent: q.changePercent,
+          open: q.open,
+          high: q.high,
+          low: q.low,
+          prevClose: q.prevClose,
+          isPositive: q.isPositive,
+          dhanService: _service,
+        ),
+      ),
+    ).then((_) {
+      _timer = Timer.periodic(const Duration(seconds: 5), (_) => _fetchLTP());
+    });
+  }
+
   Widget _detailTile(String label, String value, {Color? color}) {
     return Builder(builder: (context) {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
-          color: (color ?? Colors.blue).withOpacity(0.07),
+          color: (color ?? Colors.blue).withValues(alpha: 0.07),
           borderRadius: BorderRadius.circular(10),
         ),
         child: Column(
@@ -344,8 +390,7 @@ class _LtpScreenState extends State<LtpScreen> {
             Text(value,
                 style: TextStyle(
                     fontWeight: FontWeight.bold,
-                    color: color ??
-                        Theme.of(context).colorScheme.onSurface)),
+                    color: color ?? Theme.of(context).colorScheme.onSurface)),
           ],
         ),
       );

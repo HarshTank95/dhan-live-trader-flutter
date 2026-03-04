@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'package:candlesticks/candlesticks.dart';
 import 'scrip_service.dart';
 
 // Typed exceptions for better error handling in UI
@@ -155,6 +156,105 @@ class DhanService {
     final closes = json['close'] as List<dynamic>?;
     if (closes == null || closes.isEmpty) return 0;
     return (closes.last as num).toDouble();
+  }
+
+  // ── Intraday candles (today, minute intervals) ───────────────────────
+  Future<List<Candle>> fetchIntraday(int securityId, String interval) async {
+    final today = _fmt(DateTime.now());
+    http.Response response;
+    try {
+      response = await http.post(
+        Uri.parse('$_baseUrl/v2/charts/intraday'),
+        headers: {
+          'access-token': accessToken,
+          'client-id': clientId,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: jsonEncode({
+          'securityId': securityId.toString(),
+          'exchangeSegment': 'NSE_EQ',
+          'instrument': 'EQUITY',
+          'interval': interval,
+          'fromDate': today,
+          'toDate': today,
+        }),
+      );
+    } catch (e) {
+      throw DhanNetworkException('No internet connection or server unreachable');
+    }
+
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      throw DhanAuthException('Access token expired or invalid.');
+    }
+    if (response.statusCode != 200) {
+      throw Exception('API error (${response.statusCode})');
+    }
+
+    return _parseCandles(response.body);
+  }
+
+  // ── Historical daily candles ─────────────────────────────────────────
+  Future<List<Candle>> fetchHistoricalDailyCandles(
+      int securityId, int days) async {
+    final toDate = DateTime.now().subtract(const Duration(days: 1));
+    final fromDate = DateTime.now().subtract(Duration(days: days));
+
+    http.Response response;
+    try {
+      response = await http.post(
+        Uri.parse('$_baseUrl/v2/charts/historical'),
+        headers: {
+          'access-token': accessToken,
+          'client-id': clientId,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: jsonEncode({
+          'securityId': securityId.toString(),
+          'exchangeSegment': 'NSE_EQ',
+          'instrument': 'EQUITY',
+          'expiryCode': 0,
+          'oi': false,
+          'fromDate': _fmt(fromDate),
+          'toDate': _fmt(toDate),
+        }),
+      );
+    } catch (e) {
+      throw DhanNetworkException('No internet connection or server unreachable');
+    }
+
+    if (response.statusCode != 200) {
+      throw Exception('API error (${response.statusCode})');
+    }
+
+    return _parseCandles(response.body);
+  }
+
+  List<Candle> _parseCandles(String body) {
+    final json = jsonDecode(body);
+    final opens = (json['open'] as List<dynamic>?)?.map((e) => (e as num).toDouble()).toList() ?? [];
+    final highs = (json['high'] as List<dynamic>?)?.map((e) => (e as num).toDouble()).toList() ?? [];
+    final lows = (json['low'] as List<dynamic>?)?.map((e) => (e as num).toDouble()).toList() ?? [];
+    final closes = (json['close'] as List<dynamic>?)?.map((e) => (e as num).toDouble()).toList() ?? [];
+    final volumes = (json['volume'] as List<dynamic>?)?.map((e) => (e as num).toDouble()).toList() ?? [];
+    final timestamps = (json['timestamp'] as List<dynamic>?)?.map((e) => (e as num).toInt()).toList() ?? [];
+
+    if (opens.isEmpty) return [];
+
+    final candles = <Candle>[];
+    for (int i = 0; i < opens.length; i++) {
+      candles.add(Candle(
+        date: DateTime.fromMillisecondsSinceEpoch(timestamps[i] * 1000),
+        high: highs[i],
+        low: lows[i],
+        open: opens[i],
+        close: closes[i],
+        volume: i < volumes.length ? volumes[i] : 0,
+      ));
+    }
+    // candlesticks package expects newest first
+    return candles.reversed.toList();
   }
 
   String _fmt(DateTime d) =>
