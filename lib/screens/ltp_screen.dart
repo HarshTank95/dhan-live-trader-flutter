@@ -77,7 +77,7 @@ class _LtpScreenState extends State<LtpScreen> {
     // Step 4: Load prev closes + start polling
     await _service.loadPrevCloses();
     await _fetchLTP();
-    _timer = Timer.periodic(const Duration(seconds: 5), (_) => _fetchLTP());
+    _timer = Timer.periodic(const Duration(seconds: 2), (_) => _fetchLTP());
   }
 
   void _applyActiveWatchlist() {
@@ -201,7 +201,7 @@ class _LtpScreenState extends State<LtpScreen> {
       await _fetchLTP();
     }
 
-    _timer = Timer.periodic(const Duration(seconds: 5), (_) => _fetchLTP());
+    _timer = Timer.periodic(const Duration(seconds: 2), (_) => _fetchLTP());
   }
 
   void _openEditCredentials() {
@@ -369,7 +369,7 @@ class _LtpScreenState extends State<LtpScreen> {
         ),
       ),
     ).then((_) {
-      _timer = Timer.periodic(const Duration(seconds: 5), (_) => _fetchLTP());
+      _timer = Timer.periodic(const Duration(seconds: 2), (_) => _fetchLTP());
     });
   }
 
@@ -942,7 +942,7 @@ class _LtpScreenState extends State<LtpScreen> {
             children: [
               Icon(Icons.refresh, size: 13, color: Colors.grey),
               SizedBox(width: 4),
-              Text('Auto-refreshing every 5 seconds',
+              Text('Auto-refreshing every 2 seconds',
                   style: TextStyle(color: Colors.grey, fontSize: 12)),
             ],
           ),
