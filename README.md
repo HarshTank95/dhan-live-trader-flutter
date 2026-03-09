@@ -8,7 +8,7 @@ A Flutter mobile app for viewing **live stock prices** from your [Dhan](https://
 
 ### Live Prices
 - Fetches real-time LTP (Last Traded Price) using Dhan's Market Feed API
-- Auto-refreshes every **5 seconds**
+- Auto-refreshes every **2 seconds** (managed by centralized rate limiter)
 - Shows **% change** from previous day's closing price
 - Displays **Open, High, Low, Prev Close** on tap
 
@@ -35,11 +35,20 @@ A Flutter mobile app for viewing **live stock prices** from your [Dhan](https://
 - Worst performers first (▼ % Change)
 - Name A → Z
 
+### Candlestick Chart
+- Tap any stock → detail sheet → **View Chart** button
+- **5 min** and **15 min** intraday intervals
+- Scroll left to auto-load previous trading days (handles weekends + holidays)
+- **Touch any candle** to see its OHLC + volume in the info bar
+- **Jump to latest** toolbar button to snap back to today's candles
+- Filtered to **market hours only** (9:15 AM – 3:30 PM IST)
+
 ### UI & UX
 - **Dark Mode** toggle (saved across sessions)
 - **Pull to refresh** manually
 - Modern side drawer with gradient header
 - Stock detail bottom sheet on tap
+- Branded splash screen (blue theme)
 
 ### Credentials
 - Enter Dhan **Client ID** and **Access Token** once
@@ -60,11 +69,13 @@ lib/
 ├── screens/
 │   ├── token_entry_screen.dart        # Credential input screen
 │   ├── ltp_screen.dart                # Main live prices screen
+│   ├── chart_screen.dart              # Candlestick chart with OHLC info bar
 │   ├── watchlist_manager_screen.dart  # Create / rename / delete watchlists
 │   └── watchlist_screen.dart          # Add / remove stocks in a watchlist
 │
 └── services/
-    ├── dhan_service.dart              # Dhan API calls (OHLC, historical)
+    ├── dhan_service.dart              # Dhan API calls (OHLC, intraday, historical)
+    ├── rate_limiter.dart              # Centralized API rate limiter (singleton)
     ├── scrip_service.dart             # Scrip master download, parse, cache
     └── storage_service.dart           # SharedPreferences: credentials, watchlists, theme
 ```
@@ -79,6 +90,8 @@ lib/
 | `shared_preferences` | Local key-value storage |
 | `path_provider` | File system access for scrip cache |
 | `uuid` | Unique IDs for each watchlist |
+| `candlesticks` | Candlestick chart widget |
+| `flutter_native_splash` | Branded splash screen |
 
 ---
 
@@ -87,6 +100,7 @@ lib/
 | Endpoint | Purpose |
 |---|---|
 | `POST /v2/marketfeed/ohlc` | Live LTP + Open, High, Low |
+| `POST /v2/charts/intraday` | Intraday candlestick data (5m / 15m) |
 | `POST /v2/charts/historical` | Previous day's closing price |
 | `GET images.dhan.co/api-data/api-scrip-master.csv` | Full NSE instruments list |
 
@@ -111,7 +125,7 @@ flutter run
 1. Enter your **Dhan Client ID** and **Access Token**
 2. App downloads the scrip master (one-time per day)
 3. Default watchlist loads with 5 Nifty stocks
-4. Live prices start updating every 5 seconds
+4. Live prices start updating every 2 seconds
 
 ---
 
@@ -127,7 +141,7 @@ Download scrip master CSV (if not cached today)
   ↓
 Fetch yesterday's close for each stock (historical API)
   ↓
-Start live OHLC polling every 5 seconds
+Start live OHLC polling every 2 seconds
 ```
 
 ### % Change Calculation
@@ -165,7 +179,8 @@ Next day                 →  Re-download fresh copy
 
 | Action | API Used | Category | Frequency |
 |---|---|---|---|
-| Live price polling | `POST /v2/marketfeed/ohlc` | Quote | Every 5 seconds |
+| Live price polling | `POST /v2/marketfeed/ohlc` | Quote | Every 2 seconds |
+| Intraday chart | `POST /v2/charts/intraday` | Data | On demand (user opens chart) |
 | Prev close at startup | `POST /v2/charts/historical` | Data | On startup per stock |
 | Intraday chart load | `POST /v2/charts/intraday` | Data | On demand (user tap) |
 

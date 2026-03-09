@@ -58,29 +58,70 @@ class _ChartScreenState extends State<ChartScreen> {
   _Interval _selectedInterval = _Interval.m15;
   List<Candle> _candles = [];
   bool _isLoading = true;
+  bool _isLoadingMore = false;
   String? _error;
+  // Tracks the oldest date we've loaded so far
+  late DateTime _oldestLoadedDate;
+
+  // Candle hover / OHLC display
+  Candle? _hoveredCandle;
+  int _pkgScrollIndex = -10;      // mirrors the package's internal scroll index
+  int _pkgScrollDragStartIndex = -10;
+  double _pkgScrollDragStartX = 0;
+  static const _defaultCandleWidth = 6.0; // package default before any zoom
 
   @override
   void initState() {
     super.initState();
+    _oldestLoadedDate = DateTime.now();
     _loadChart();
   }
+
+  // Minimum candles needed to fill the screen (~6px each, ~330px usable)
+  static const _minCandles = 60;
 
   Future<void> _loadChart() async {
     setState(() {
       _isLoading = true;
       _error = null;
       _candles = [];
+      _oldestLoadedDate = DateTime.now();
+      _pkgScrollIndex = -10;
+      _pkgScrollDragStartIndex = -10;
+      _hoveredCandle = null;
     });
 
     try {
-      final candles = await widget.dhanService.fetchIntraday(
+      // Load today's candles
+      var allCandles = await widget.dhanService.fetchIntraday(
         widget.securityId,
         _selectedInterval.apiValue,
       );
+
+      // Auto-load previous days until chart is full
+      DateTime dayToLoad = _oldestLoadedDate;
+      int attempts = 0;
+      while (allCandles.length < _minCandles && attempts < 10) {
+        dayToLoad = _prevWeekday(dayToLoad);
+        attempts++;
+        try {
+          final moreCandles = await widget.dhanService.fetchIntraday(
+            widget.securityId,
+            _selectedInterval.apiValue,
+            date: dayToLoad,
+          );
+          if (moreCandles.isNotEmpty) {
+            allCandles = [...allCandles, ...moreCandles];
+          }
+        } catch (_) {
+          // Skip failed days
+        }
+      }
+      _oldestLoadedDate = dayToLoad;
+
       if (!mounted) return;
       setState(() {
-        _candles = candles;
+        _candles = allCandles;
         _isLoading = false;
       });
     } on DhanAuthException catch (e) {
@@ -93,6 +134,96 @@ class _ChartScreenState extends State<ChartScreen> {
       if (!mounted) return;
       setState(() { _error = 'Failed to load chart data'; _isLoading = false; });
     }
+  }
+
+  /// Called by the candlestick widget when user scrolls to the left edge.
+  Future<void> _loadMoreCandles() async {
+    if (_isLoadingMore) return;
+    setState(() => _isLoadingMore = true);
+
+    try {
+      // Try up to 7 days back to handle weekends AND market holidays
+      DateTime dayToTry = _prevWeekday(_oldestLoadedDate);
+      List<Candle> moreCandles = [];
+
+      for (int attempt = 0; attempt < 7; attempt++) {
+        moreCandles = await widget.dhanService.fetchIntraday(
+          widget.securityId,
+          _selectedInterval.apiValue,
+          date: dayToTry,
+        );
+
+        if (moreCandles.isNotEmpty) break;
+
+        // No data (holiday or no trading) — skip to the day before
+        _oldestLoadedDate = dayToTry;
+        dayToTry = _prevWeekday(dayToTry);
+      }
+
+      if (!mounted) return;
+      setState(() {
+        if (moreCandles.isNotEmpty) {
+          _candles = [..._candles, ...moreCandles];
+        }
+        // Always advance past the days we tried
+        _oldestLoadedDate = dayToTry;
+      });
+    } catch (_) {
+      // Silently ignore
+    } finally {
+      if (mounted) setState(() => _isLoadingMore = false);
+    }
+  }
+
+  /// Returns the previous weekday (skips Saturday and Sunday).
+  /// Holidays are handled by trying multiple days in _loadMoreCandles.
+  DateTime _prevWeekday(DateTime date) {
+    var prev = date.subtract(const Duration(days: 1));
+    while (prev.weekday == DateTime.saturday ||
+        prev.weekday == DateTime.sunday) {
+      prev = prev.subtract(const Duration(days: 1));
+    }
+    return prev;
+  }
+
+  // ── Candle hover tracking ────────────────────────────────────────────────
+
+  void _onPointerDown(PointerDownEvent e, double chartWidth) {
+    _pkgScrollDragStartX = e.localPosition.dx;
+    _pkgScrollDragStartIndex = _pkgScrollIndex;
+    _updateHoveredCandle(e.localPosition.dx, chartWidth);
+  }
+
+  void _onPointerMove(PointerMoveEvent e, double chartWidth) {
+    // Mirror the package's scroll formula: index = lastIndex + dx ~/ candleWidth
+    final dx = e.localPosition.dx - _pkgScrollDragStartX;
+    _pkgScrollIndex = (_pkgScrollDragStartIndex + dx ~/ _defaultCandleWidth)
+        .clamp(-10, _candles.length - 1);
+    _updateHoveredCandle(e.localPosition.dx, chartWidth);
+  }
+
+  void _onPointerUp(PointerUpEvent e) {
+    _pkgScrollDragStartIndex = _pkgScrollIndex; // mirrors package's onPanEnd
+    if (mounted) setState(() => _hoveredCandle = null);
+  }
+
+  void _updateHoveredCandle(double x, double chartWidth) {
+    const priceBarWidth = 60.0;
+    final usableWidth = chartWidth - priceBarWidth;
+    if (_candles.isEmpty || x < 0 || x >= usableWidth) {
+      setState(() => _hoveredCandle = null);
+      return;
+    }
+    final baseIdx = _pkgScrollIndex < 0 ? 0 : _pkgScrollIndex;
+    final candlesFromRight = ((usableWidth - x) / _defaultCandleWidth).round();
+    final idx = (baseIdx + candlesFromRight).clamp(0, _candles.length - 1);
+    setState(() => _hoveredCandle = _candles[idx]);
+  }
+
+  String _fmtVol(double vol) {
+    if (vol >= 1e6) return '${(vol / 1e6).toStringAsFixed(1)}M';
+    if (vol >= 1e3) return '${(vol / 1e3).toStringAsFixed(0)}K';
+    return vol.toStringAsFixed(0);
   }
 
   void _selectInterval(_Interval interval) {
@@ -249,64 +380,70 @@ class _ChartScreenState extends State<ChartScreen> {
             ),
           ),
 
-          // ── Interval selector ────────────────────────────────────────
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
-            child: Row(
-              children: [
-                const Text('Interval',
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey,
-                        fontWeight: FontWeight.w500)),
-                const SizedBox(width: 12),
-                Container(
-                  decoration: BoxDecoration(
-                    color: isDark
-                        ? Colors.grey.shade800
-                        : Colors.grey.shade200,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: _Interval.values.map((interval) {
-                      final isSelected = _selectedInterval == interval;
-                      return GestureDetector(
-                        onTap: () => _selectInterval(interval),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 200),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 7),
+          // ── Interval selector / Candle OHLC bar ──────────────────────
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 150),
+            child: _hoveredCandle != null
+                ? _buildCandleInfoRow(_hoveredCandle!, isDark)
+                : Padding(
+                    key: const ValueKey('interval'),
+                    padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+                    child: Row(
+                      children: [
+                        const Text('Interval',
+                            style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey,
+                                fontWeight: FontWeight.w500)),
+                        const SizedBox(width: 12),
+                        Container(
                           decoration: BoxDecoration(
-                            color: isSelected
-                                ? Colors.blue
-                                : Colors.transparent,
+                            color: isDark
+                                ? Colors.grey.shade800
+                                : Colors.grey.shade200,
                             borderRadius: BorderRadius.circular(10),
                           ),
-                          child: Text(
-                            interval.label,
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                              color: isSelected
-                                  ? Colors.white
-                                  : Colors.grey,
-                            ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: _Interval.values.map((interval) {
+                              final isSelected = _selectedInterval == interval;
+                              return GestureDetector(
+                                onTap: () => _selectInterval(interval),
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 200),
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 16, vertical: 7),
+                                  decoration: BoxDecoration(
+                                    color: isSelected
+                                        ? Colors.blue
+                                        : Colors.transparent,
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Text(
+                                    interval.label,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                      color: isSelected
+                                          ? Colors.white
+                                          : Colors.grey,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }).toList(),
                           ),
                         ),
-                      );
-                    }).toList(),
+                        const Spacer(),
+                        if (!_isLoading && _candles.isNotEmpty)
+                          Text(
+                            '${_candles.length} candles',
+                            style: const TextStyle(
+                                fontSize: 11, color: Colors.grey),
+                          ),
+                      ],
+                    ),
                   ),
-                ),
-                const Spacer(),
-                if (!_isLoading && _candles.isNotEmpty)
-                  Text(
-                    '${_candles.length} candles',
-                    style: const TextStyle(
-                        fontSize: 11, color: Colors.grey),
-                  ),
-              ],
-            ),
           ),
 
           // ── Chart ────────────────────────────────────────────────────
@@ -320,11 +457,22 @@ class _ChartScreenState extends State<ChartScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(Icons.swipe, size: 13, color: Colors.grey.shade400),
-                  const SizedBox(width: 4),
-                  Text('Scroll to navigate  •  Pinch to zoom',
-                      style: TextStyle(
-                          fontSize: 11, color: Colors.grey.shade400)),
+                  if (_isLoadingMore) ...[
+                    const SizedBox(
+                      width: 11, height: 11,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    const SizedBox(width: 6),
+                    Text('Loading older data...',
+                        style: TextStyle(
+                            fontSize: 11, color: Colors.grey.shade400)),
+                  ] else ...[
+                    Icon(Icons.swipe, size: 13, color: Colors.grey.shade400),
+                    const SizedBox(width: 4),
+                    Text('Touch candle for OHLC  •  Scroll left for older',
+                        style: TextStyle(
+                            fontSize: 11, color: Colors.grey.shade400)),
+                  ],
                 ],
               ),
             ),
@@ -439,6 +587,109 @@ class _ChartScreenState extends State<ChartScreen> {
       );
     }
 
-    return Candlesticks(candles: _candles);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bgColor = isDark ? const Color(0xFF121212) : Colors.white;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // The package hardcodes "-XXXXK" as the volume axis label.
+        // We cover it and render our own "VOL" label.
+        // Formula: toolbar(30) + (height - 50) * 0.75 ≈ height * 0.75 - 7.5
+        final volumeLabelTop = constraints.maxHeight * 0.75 - 8;
+
+        return Listener(
+          onPointerDown: (e) => _onPointerDown(e, constraints.maxWidth),
+          onPointerMove: (e) => _onPointerMove(e, constraints.maxWidth),
+          onPointerUp: _onPointerUp,
+          onPointerCancel: (_) =>
+              setState(() => _hoveredCandle = null),
+          child: Stack(
+            children: [
+              Candlesticks(
+                candles: _candles,
+                onLoadMoreCandles: _loadMoreCandles,
+                actions: [
+                  ToolBarAction(
+                    width: 38,
+                    onPressed: _loadChart,
+                    child: const Tooltip(
+                      message: 'Jump to latest',
+                      child: Icon(Icons.skip_next, size: 20),
+                    ),
+                  ),
+                ],
+              ),
+              // Replace package's hardcoded "-XXXXK" volume label with "VOL"
+              Positioned(
+                top: volumeLabelTop,
+                right: 0,
+                width: 60,
+                height: 22,
+                child: Container(
+                  color: bgColor,
+                  alignment: Alignment.centerLeft,
+                  padding: const EdgeInsets.only(left: 4),
+                  child: Text('VOL',
+                      style: TextStyle(
+                          fontSize: 9, color: Colors.grey.shade400)),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildCandleInfoRow(Candle candle, bool isDark) {
+    final isBull = candle.close >= candle.open;
+    final priceColor = isBull ? Colors.green : Colors.red;
+    final h = candle.date.hour.toString().padLeft(2, '0');
+    final m = candle.date.minute.toString().padLeft(2, '0');
+
+    return Container(
+      key: const ValueKey('ohlc'),
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+      child: Row(
+        children: [
+          Text('$h:$m',
+              style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.grey.shade500,
+                  fontWeight: FontWeight.w600)),
+          const SizedBox(width: 10),
+          _ohlcChip('O', candle.open, Colors.blue),
+          _ohlcChip('H', candle.high, Colors.green),
+          _ohlcChip('L', candle.low, Colors.red),
+          _ohlcChip('C', candle.close, priceColor),
+          const Spacer(),
+          Icon(Icons.bar_chart, size: 12, color: Colors.grey.shade400),
+          const SizedBox(width: 3),
+          Text(_fmtVol(candle.volume),
+              style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.grey.shade500)),
+        ],
+      ),
+    );
+  }
+
+  Widget _ohlcChip(String label, double value, Color color) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 10),
+      child: RichText(
+        text: TextSpan(children: [
+          TextSpan(
+              text: '$label ',
+              style: const TextStyle(fontSize: 10, color: Colors.grey)),
+          TextSpan(
+              text: value.toStringAsFixed(2),
+              style: TextStyle(
+                  fontSize: 11,
+                  color: color,
+                  fontWeight: FontWeight.w600)),
+        ]),
+      ),
+    );
   }
 }

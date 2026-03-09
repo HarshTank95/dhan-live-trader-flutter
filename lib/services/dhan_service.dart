@@ -165,12 +165,13 @@ class DhanService {
     return (closes.last as num).toDouble();
   }
 
-  // ── Intraday candles (today, minute intervals) ───────────────────────
-  Future<List<Candle>> fetchIntraday(int securityId, String interval) async {
+  // ── Intraday candles (for a specific date, minute intervals) ────────
+  Future<List<Candle>> fetchIntraday(int securityId, String interval,
+      {DateTime? date}) async {
     // Watchman: enforce Data API rate limit (5 req/sec, 100k/day)
     await RateLimiter.instance.acquire(ApiCategory.data);
 
-    final today = _fmt(DateTime.now());
+    final dateStr = _fmt(date ?? DateTime.now());
     http.Response response;
     try {
       response = await http.post(
@@ -186,8 +187,8 @@ class DhanService {
           'exchangeSegment': 'NSE_EQ',
           'instrument': 'EQUITY',
           'interval': interval,
-          'fromDate': today,
-          'toDate': today,
+          'fromDate': dateStr,
+          'toDate': dateStr,
         }),
       );
     } catch (e) {
@@ -196,6 +197,10 @@ class DhanService {
 
     if (response.statusCode == 401 || response.statusCode == 403) {
       throw DhanAuthException('Access token expired or invalid.');
+    }
+    // 400 = no data for this date (market closed, holiday, pre-market)
+    if (response.statusCode == 400) {
+      return [];
     }
     if (response.statusCode != 200) {
       throw Exception('API error (${response.statusCode})');
@@ -255,10 +260,22 @@ class DhanService {
 
     if (opens.isEmpty) return [];
 
+    // Market hours: 9:15 AM to 3:30 PM IST
+    const marketOpenMinutes = 9 * 60 + 15;  // 9:15 AM
+    const marketCloseMinutes = 15 * 60 + 30; // 3:30 PM
+
     final candles = <Candle>[];
     for (int i = 0; i < opens.length; i++) {
+      final dt = DateTime.fromMillisecondsSinceEpoch(timestamps[i] * 1000);
+      final minuteOfDay = dt.hour * 60 + dt.minute;
+
+      // Skip candles outside market hours (pre-market junk)
+      if (minuteOfDay < marketOpenMinutes || minuteOfDay > marketCloseMinutes) {
+        continue;
+      }
+
       candles.add(Candle(
-        date: DateTime.fromMillisecondsSinceEpoch(timestamps[i] * 1000),
+        date: dt,
         high: highs[i],
         low: lows[i],
         open: opens[i],
