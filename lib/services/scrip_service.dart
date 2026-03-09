@@ -29,7 +29,10 @@ class ScripInfo {
 }
 
 class ScripService {
-  static const _csvUrl =
+  // Authenticated endpoint — returns NSE_EQ only (much smaller than full CSV)
+  static const _nseEqUrl = 'https://api.dhan.co/v2/instrument/NSE_EQ';
+  // Public fallback — full master with all segments
+  static const _fallbackUrl =
       'https://images.dhan.co/api-data/api-scrip-master.csv';
   static const _cacheKey = 'scrip_cache_date';
   static const _cacheFile = 'scrips_cache.json';
@@ -41,7 +44,10 @@ class ScripService {
   bool get isLoaded => _scrips.isNotEmpty;
 
   // ── Load scrips (cache-first, download if stale) ────────────────────
-  Future<void> loadScrips() async {
+  //
+  // Passes credentials so we can use the authenticated NSE_EQ endpoint
+  // (returns only ~2,000 equity rows vs the full 50,000-row master CSV).
+  Future<void> loadScrips({String? clientId, String? accessToken}) async {
     final prefs = await SharedPreferences.getInstance();
     final cachedDate = prefs.getString(_cacheKey) ?? '';
     final today = _today();
@@ -54,14 +60,23 @@ class ScripService {
       }
     }
 
-    // Download fresh from Dhan
-    final downloaded = await _downloadAndParse();
+    // Try authenticated NSE_EQ-only endpoint first (fastest)
+    List<ScripInfo> downloaded = [];
+    if (clientId != null && accessToken != null) {
+      downloaded = await _downloadNseEq(clientId, accessToken);
+    }
+
+    // Fall back to public full-master CSV if auth endpoint failed
+    if (downloaded.isEmpty) {
+      downloaded = await _downloadAndParse();
+    }
+
     if (downloaded.isNotEmpty) {
       _scrips = downloaded;
       await _saveToFile(downloaded);
       await prefs.setString(_cacheKey, today);
     } else if (_scrips.isEmpty) {
-      // Fallback to cache even if stale
+      // Last resort: use stale cache
       final cached = await _loadFromFile();
       if (cached != null) _scrips = cached;
     }
@@ -88,11 +103,30 @@ class ScripService {
     }
   }
 
-  // ── Download + parse CSV ─────────────────────────────────────────────
+  // ── Download NSE_EQ only via authenticated API (primary) ─────────────
+  Future<List<ScripInfo>> _downloadNseEq(
+      String clientId, String accessToken) async {
+    try {
+      final response = await http.get(
+        Uri.parse(_nseEqUrl),
+        headers: {
+          'access-token': accessToken,
+          'client-id': clientId,
+          'Accept': 'text/csv',
+        },
+      ).timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) return [];
+      return _parseCsv(response.body); // same CSV format, already NSE_EQ
+    } catch (_) {
+      return [];
+    }
+  }
+
+  // ── Download full master CSV (fallback, no auth needed) ──────────────
   Future<List<ScripInfo>> _downloadAndParse() async {
     try {
       final response = await http
-          .get(Uri.parse(_csvUrl))
+          .get(Uri.parse(_fallbackUrl))
           .timeout(const Duration(seconds: 30));
       if (response.statusCode != 200) return [];
       return _parseCsv(response.body);

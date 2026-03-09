@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../main.dart';
 import '../models/watchlist_model.dart';
+import '../services/dhan_feed_service.dart';
 import '../services/dhan_service.dart'
     show DhanService, DhanAuthException, DhanRateLimitException, DhanNetworkException, StockQuote;
 import '../services/scrip_service.dart';
@@ -40,9 +41,14 @@ class _LtpScreenState extends State<LtpScreen> {
   bool _isAuthError = false;
   bool _isNetworkError = false;
   bool _isRateLimitError = false;
-  Timer? _timer;
   DateTime? _lastUpdated;
   SortMode _sortMode = SortMode.changeDesc;
+
+  // WebSocket live feed
+  DhanFeedService? _feedService;
+  StreamSubscription<Map<int, FeedUpdate>>? _feedSub;
+  StreamSubscription<FeedStatus>? _statusSub;
+  FeedStatus _feedStatus = FeedStatus.disconnected;
 
   // Funds / balance
   Map<String, double>? _funds;
@@ -72,17 +78,88 @@ class _LtpScreenState extends State<LtpScreen> {
     final savedActiveId = await StorageService.loadActiveWatchlistId();
     _activeWatchlistId = savedActiveId ?? _watchlists.first.id;
 
-    // Step 2: Download/cache scrip master
-    await _scripService.loadScrips();
+    // Step 2: Download/cache scrip master (NSE_EQ only via auth endpoint)
+    await _scripService.loadScrips(
+      clientId: widget.clientId,
+      accessToken: widget.accessToken,
+    );
     setState(() => _isLoadingScrips = false);
 
     // Step 3: Apply active watchlist
     _applyActiveWatchlist();
 
-    // Step 4: Load prev closes + start polling
+    // Step 4: Load prev closes + initial REST fetch
     await _service.loadPrevCloses();
     await _fetchLTP();
-    _timer = Timer.periodic(const Duration(seconds: 2), (_) => _fetchLTP());
+
+    // Step 5: Switch to live WebSocket feed (if no auth error)
+    if (!_isAuthError) _connectFeed();
+  }
+
+  List<int> _getActiveSecurityIds() {
+    return _activeWatchlist?.stockIds
+            .map((id) => _scripService.findById(id))
+            .whereType<ScripInfo>()
+            .map((s) => s.securityId)
+            .toList() ??
+        [];
+  }
+
+  void _connectFeed() {
+    _feedService?.dispose();
+    _feedService = DhanFeedService(
+      clientId: widget.clientId,
+      accessToken: widget.accessToken,
+    );
+
+    _statusSub?.cancel();
+    _statusSub = _feedService!.statusStream.listen((status) {
+      if (!mounted) return;
+      setState(() => _feedStatus = status);
+    });
+
+    _feedSub?.cancel();
+    _feedSub = _feedService!.dataStream.listen((data) {
+      if (!mounted) return;
+      _updateFromFeed(data);
+    });
+
+    _feedService!.connect(_getActiveSecurityIds());
+  }
+
+  void _updateFromFeed(Map<int, FeedUpdate> data) {
+    final wl = _activeWatchlist;
+    if (wl == null) return;
+
+    final scrips = wl.stockIds
+        .map((id) => _scripService.findById(id))
+        .whereType<ScripInfo>()
+        .toList();
+    if (scrips.isEmpty) return;
+
+    final newQuotes = scrips.map((scrip) {
+      final u = data[scrip.securityId];
+      return StockQuote(
+        symbol: scrip.symbol,
+        name: scrip.name,
+        securityId: scrip.securityId,
+        ltp: u?.ltp ?? 0,
+        open: u?.open ?? 0,
+        high: u?.high ?? 0,
+        low: u?.low ?? 0,
+        prevClose: u?.prevClose ?? 0,
+      );
+    }).toList();
+
+    setState(() {
+      _quotes = _sorted(newQuotes);
+      _lastUpdated = DateTime.now();
+      _isLoading = false;
+      _error = null;
+      _isAuthError = false;
+      _isNetworkError = false;
+      _isRateLimitError = false;
+    });
   }
 
   void _applyActiveWatchlist() {
@@ -108,8 +185,10 @@ class _LtpScreenState extends State<LtpScreen> {
     Navigator.pop(context); // close drawer
     await StorageService.saveActiveWatchlistId(id);
     _applyActiveWatchlist();
-    await _service.loadPrevCloses();
-    await _fetchLTP();
+    // Load prevCloses for new watchlist in background (needed by pull-to-refresh)
+    unawaited(_service.loadPrevCloses());
+    // Resubscribe WebSocket with new instrument list
+    _feedService?.resubscribe(_getActiveSecurityIds());
   }
 
   Future<void> _fetchLTP() async {
@@ -180,7 +259,6 @@ class _LtpScreenState extends State<LtpScreen> {
   }
 
   Future<void> _openWatchlistManager() async {
-    _timer?.cancel();
     Navigator.pop(context); // close drawer
 
     final result = await Navigator.push<({List<WatchlistModel> watchlists, String activeId})>(
@@ -202,15 +280,12 @@ class _LtpScreenState extends State<LtpScreen> {
         _quotes = [];
       });
       _applyActiveWatchlist();
-      await _service.loadPrevCloses();
-      await _fetchLTP();
+      unawaited(_service.loadPrevCloses());
+      _feedService?.resubscribe(_getActiveSecurityIds());
     }
-
-    _timer = Timer.periodic(const Duration(seconds: 2), (_) => _fetchLTP());
   }
 
   void _openEditCredentials() {
-    _timer?.cancel();
     Navigator.pop(context);
     Navigator.push(
       context,
@@ -246,16 +321,13 @@ class _LtpScreenState extends State<LtpScreen> {
   }
 
   void _openHoldings() {
-    _timer?.cancel();
     Navigator.pop(context); // close drawer
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => HoldingsScreen(dhanService: _service),
       ),
-    ).then((_) {
-      _timer = Timer.periodic(const Duration(seconds: 2), (_) => _fetchLTP());
-    });
+    );
   }
 
   void _showStockDetail(StockQuote q) {
@@ -378,7 +450,6 @@ class _LtpScreenState extends State<LtpScreen> {
   }
 
   void _openChart(StockQuote q) {
-    _timer?.cancel();
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -397,9 +468,7 @@ class _LtpScreenState extends State<LtpScreen> {
           dhanService: _service,
         ),
       ),
-    ).then((_) {
-      _timer = Timer.periodic(const Duration(seconds: 2), (_) => _fetchLTP());
-    });
+    );
   }
 
   Widget _detailTile(String label, String value, {Color? color}) {
@@ -428,7 +497,9 @@ class _LtpScreenState extends State<LtpScreen> {
 
   @override
   void dispose() {
-    _timer?.cancel();
+    _statusSub?.cancel();
+    _feedSub?.cancel();
+    _feedService?.dispose();
     super.dispose();
   }
 
@@ -1068,13 +1139,37 @@ class _LtpScreenState extends State<LtpScreen> {
         Container(
           padding: const EdgeInsets.all(10),
           color: Theme.of(context).colorScheme.surfaceContainerHighest,
-          child: const Row(
+          child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(Icons.refresh, size: 13, color: Colors.grey),
-              SizedBox(width: 4),
-              Text('Auto-refreshing every 2 seconds',
-                  style: TextStyle(color: Colors.grey, fontSize: 12)),
+              Container(
+                width: 7, height: 7,
+                decoration: BoxDecoration(
+                  color: switch (_feedStatus) {
+                    FeedStatus.connected => Colors.green,
+                    FeedStatus.connecting => Colors.orange,
+                    FeedStatus.disconnected => Colors.red,
+                  },
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                switch (_feedStatus) {
+                  FeedStatus.connected => 'LIVE',
+                  FeedStatus.connecting => 'Connecting...',
+                  FeedStatus.disconnected => 'Reconnecting...',
+                },
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: switch (_feedStatus) {
+                    FeedStatus.connected => Colors.green,
+                    FeedStatus.connecting => Colors.orange,
+                    FeedStatus.disconnected => Colors.red,
+                  },
+                ),
+              ),
             ],
           ),
         ),
