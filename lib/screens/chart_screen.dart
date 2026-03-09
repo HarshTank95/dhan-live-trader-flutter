@@ -7,15 +7,19 @@ enum _Interval { m5, m15 }
 extension _IntervalLabel on _Interval {
   String get label {
     switch (this) {
-      case _Interval.m5:  return '5 min';
-      case _Interval.m15: return '15 min';
+      case _Interval.m5:
+        return '5 min';
+      case _Interval.m15:
+        return '15 min';
     }
   }
 
   String get apiValue {
     switch (this) {
-      case _Interval.m5:  return '5';
-      case _Interval.m15: return '15';
+      case _Interval.m5:
+        return '5';
+      case _Interval.m15:
+        return '15';
     }
   }
 }
@@ -65,7 +69,7 @@ class _ChartScreenState extends State<ChartScreen> {
 
   // Candle hover / OHLC display
   Candle? _hoveredCandle;
-  int _pkgScrollIndex = -10;      // mirrors the package's internal scroll index
+  int _pkgScrollIndex = -10; // mirrors the package's internal scroll index
   int _pkgScrollDragStartIndex = -10;
   double _pkgScrollDragStartX = 0;
   static const _defaultCandleWidth = 6.0; // package default before any zoom
@@ -126,13 +130,22 @@ class _ChartScreenState extends State<ChartScreen> {
       });
     } on DhanAuthException catch (e) {
       if (!mounted) return;
-      setState(() { _error = e.message; _isLoading = false; });
+      setState(() {
+        _error = e.message;
+        _isLoading = false;
+      });
     } on DhanNetworkException catch (e) {
       if (!mounted) return;
-      setState(() { _error = e.message; _isLoading = false; });
+      setState(() {
+        _error = e.message;
+        _isLoading = false;
+      });
     } catch (e) {
       if (!mounted) return;
-      setState(() { _error = 'Failed to load chart data'; _isLoading = false; });
+      setState(() {
+        _error = 'Failed to load chart data';
+        _isLoading = false;
+      });
     }
   }
 
@@ -259,41 +272,55 @@ class _ChartScreenState extends State<ChartScreen> {
                     child: Row(
                       children: [
                         IconButton(
-                          icon: const Icon(Icons.arrow_back,
-                              color: Colors.white),
+                          icon: const Icon(
+                            Icons.arrow_back,
+                            color: Colors.white,
+                          ),
                           onPressed: () => Navigator.pop(context),
                         ),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(widget.symbol,
-                                  style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.bold)),
-                              Text(widget.name,
-                                  style: TextStyle(
-                                      color: Colors.white.withValues(alpha: 0.8),
-                                      fontSize: 11),
-                                  overflow: TextOverflow.ellipsis),
+                              Text(
+                                widget.symbol,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              Text(
+                                widget.name,
+                                style: TextStyle(
+                                  color: Colors.white.withValues(alpha: 0.8),
+                                  fontSize: 11,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ],
                           ),
                         ),
                         Container(
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 4),
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
                           decoration: BoxDecoration(
                             color: Colors.white.withValues(alpha: 0.2),
                             borderRadius: BorderRadius.circular(20),
                             border: Border.all(
-                                color: Colors.white.withValues(alpha: 0.4)),
+                              color: Colors.white.withValues(alpha: 0.4),
+                            ),
                           ),
-                          child: const Text('NSE',
-                              style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600)),
+                          child: const Text(
+                            'NSE',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
                         ),
                       ],
                     ),
@@ -308,17 +335,20 @@ class _ChartScreenState extends State<ChartScreen> {
                         Text(
                           '₹${widget.ltp.toStringAsFixed(2)}',
                           style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 32,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: -0.5),
+                            color: Colors.white,
+                            fontSize: 32,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: -0.5,
+                          ),
                         ),
                         const SizedBox(width: 12),
                         Padding(
                           padding: const EdgeInsets.only(bottom: 4),
                           child: Container(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 10, vertical: 4),
+                              horizontal: 10,
+                              vertical: 4,
+                            ),
                             decoration: BoxDecoration(
                               color: widget.isPositive
                                   ? Colors.green.withValues(alpha: 0.25)
@@ -333,11 +363,12 @@ class _ChartScreenState extends State<ChartScreen> {
                             child: Text(
                               '$arrow ${widget.change.abs().toStringAsFixed(2)}  (${widget.changePercent.toStringAsFixed(2)}%)',
                               style: TextStyle(
-                                  color: widget.isPositive
-                                      ? Colors.green.shade200
-                                      : Colors.red.shade200,
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 13),
+                                color: widget.isPositive
+                                    ? Colors.green.shade200
+                                    : Colors.red.shade200,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 13,
+                              ),
                             ),
                           ),
                         ),
@@ -353,28 +384,37 @@ class _ChartScreenState extends State<ChartScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             decoration: BoxDecoration(
-              color: isDark
-                  ? Colors.grey.shade900
-                  : Colors.grey.shade50,
+              color: isDark ? Colors.grey.shade900 : Colors.grey.shade50,
               border: Border(
-                bottom: BorderSide(
-                    color: Colors.grey.withValues(alpha: 0.15)),
+                bottom: BorderSide(color: Colors.grey.withValues(alpha: 0.15)),
               ),
             ),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
-                _statItem('Open',
-                    '₹${widget.open.toStringAsFixed(2)}', Colors.blue),
+                _statItem(
+                  'Open',
+                  '₹${widget.open.toStringAsFixed(2)}',
+                  Colors.blue,
+                ),
                 _vDivider(),
-                _statItem('High',
-                    '₹${widget.high.toStringAsFixed(2)}', Colors.green),
+                _statItem(
+                  'High',
+                  '₹${widget.high.toStringAsFixed(2)}',
+                  Colors.green,
+                ),
                 _vDivider(),
-                _statItem('Low',
-                    '₹${widget.low.toStringAsFixed(2)}', Colors.red),
+                _statItem(
+                  'Low',
+                  '₹${widget.low.toStringAsFixed(2)}',
+                  Colors.red,
+                ),
                 _vDivider(),
-                _statItem('Prev Close',
-                    '₹${widget.prevClose.toStringAsFixed(2)}', Colors.grey),
+                _statItem(
+                  'Prev Close',
+                  '₹${widget.prevClose.toStringAsFixed(2)}',
+                  Colors.grey,
+                ),
               ],
             ),
           ),
@@ -389,11 +429,14 @@ class _ChartScreenState extends State<ChartScreen> {
                     padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
                     child: Row(
                       children: [
-                        const Text('Interval',
-                            style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.grey,
-                                fontWeight: FontWeight.w500)),
+                        const Text(
+                          'Interval',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
                         const SizedBox(width: 12),
                         Container(
                           decoration: BoxDecoration(
@@ -411,7 +454,9 @@ class _ChartScreenState extends State<ChartScreen> {
                                 child: AnimatedContainer(
                                   duration: const Duration(milliseconds: 200),
                                   padding: const EdgeInsets.symmetric(
-                                      horizontal: 16, vertical: 7),
+                                    horizontal: 16,
+                                    vertical: 7,
+                                  ),
                                   decoration: BoxDecoration(
                                     color: isSelected
                                         ? Colors.blue
@@ -438,7 +483,9 @@ class _ChartScreenState extends State<ChartScreen> {
                           Text(
                             '${_candles.length} candles',
                             style: const TextStyle(
-                                fontSize: 11, color: Colors.grey),
+                              fontSize: 11,
+                              color: Colors.grey,
+                            ),
                           ),
                       ],
                     ),
@@ -458,19 +505,28 @@ class _ChartScreenState extends State<ChartScreen> {
                 children: [
                   if (_isLoadingMore) ...[
                     const SizedBox(
-                      width: 11, height: 11,
+                      width: 11,
+                      height: 11,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     ),
                     const SizedBox(width: 6),
-                    Text('Loading older data...',
-                        style: TextStyle(
-                            fontSize: 11, color: Colors.grey.shade400)),
+                    Text(
+                      'Loading older data...',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.grey.shade400,
+                      ),
+                    ),
                   ] else ...[
                     Icon(Icons.swipe, size: 13, color: Colors.grey.shade400),
                     const SizedBox(width: 4),
-                    Text('Touch candle for OHLC  •  Scroll left for older',
-                        style: TextStyle(
-                            fontSize: 11, color: Colors.grey.shade400)),
+                    Text(
+                      'Touch candle for OHLC  •  Scroll left for older',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.grey.shade400,
+                      ),
+                    ),
                   ],
                 ],
               ),
@@ -483,23 +539,25 @@ class _ChartScreenState extends State<ChartScreen> {
   Widget _statItem(String label, String value, Color color) {
     return Column(
       children: [
-        Text(label,
-            style: const TextStyle(fontSize: 10, color: Colors.grey)),
+        Text(label, style: const TextStyle(fontSize: 10, color: Colors.grey)),
         const SizedBox(height: 3),
-        Text(value,
-            style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.bold,
-                color: color)),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.bold,
+            color: color,
+          ),
+        ),
       ],
     );
   }
 
   Widget _vDivider() => Container(
-        height: 28,
-        width: 1,
-        color: Colors.grey.withValues(alpha: 0.2),
-      );
+    height: 28,
+    width: 1,
+    color: Colors.grey.withValues(alpha: 0.2),
+  );
 
   Widget _buildChartArea() {
     if (_isLoading) {
@@ -508,12 +566,15 @@ class _ChartScreenState extends State<ChartScreen> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             const SizedBox(
-              width: 40, height: 40,
+              width: 40,
+              height: 40,
               child: CircularProgressIndicator(strokeWidth: 3),
             ),
             const SizedBox(height: 16),
-            Text('Loading ${_selectedInterval.label} candles...',
-                style: const TextStyle(color: Colors.grey)),
+            Text(
+              'Loading ${_selectedInterval.label} candles...',
+              style: const TextStyle(color: Colors.grey),
+            ),
           ],
         ),
       );
@@ -527,32 +588,41 @@ class _ChartScreenState extends State<ChartScreen> {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Container(
-                width: 72, height: 72,
+                width: 72,
+                height: 72,
                 decoration: BoxDecoration(
                   color: Colors.red.withValues(alpha: 0.1),
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(Icons.wifi_off_rounded,
-                    size: 36, color: Colors.red),
+                child: const Icon(
+                  Icons.wifi_off_rounded,
+                  size: 36,
+                  color: Colors.red,
+                ),
               ),
               const SizedBox(height: 16),
-              const Text('Could not load chart',
-                  style: TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.bold)),
+              const Text(
+                'Could not load chart',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
               const SizedBox(height: 8),
-              Text(_error!,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                      color: Colors.grey, fontSize: 13)),
+              Text(
+                _error!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.grey, fontSize: 13),
+              ),
               const SizedBox(height: 24),
               ElevatedButton.icon(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.blue,
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 24, vertical: 10),
+                    horizontal: 24,
+                    vertical: 10,
+                  ),
                   shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10)),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
                 ),
                 onPressed: _loadChart,
                 icon: const Icon(Icons.refresh),
@@ -569,12 +639,16 @@ class _ChartScreenState extends State<ChartScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.candlestick_chart_outlined,
-                size: 64, color: Colors.grey.shade300),
+            Icon(
+              Icons.candlestick_chart_outlined,
+              size: 64,
+              color: Colors.grey.shade300,
+            ),
             const SizedBox(height: 16),
-            const Text('No data for today',
-                style: TextStyle(
-                    fontSize: 16, fontWeight: FontWeight.bold)),
+            const Text(
+              'No data for today',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 8),
             const Text(
               'Intraday data is only available\non market trading days',
@@ -600,8 +674,7 @@ class _ChartScreenState extends State<ChartScreen> {
           onPointerDown: (e) => _onPointerDown(e, constraints.maxWidth),
           onPointerMove: (e) => _onPointerMove(e, constraints.maxWidth),
           onPointerUp: _onPointerUp,
-          onPointerCancel: (_) =>
-              setState(() => _hoveredCandle = null),
+          onPointerCancel: (_) => setState(() => _hoveredCandle = null),
           child: Stack(
             children: [
               Candlesticks(
@@ -628,9 +701,10 @@ class _ChartScreenState extends State<ChartScreen> {
                   color: bgColor,
                   alignment: Alignment.centerLeft,
                   padding: const EdgeInsets.only(left: 4),
-                  child: Text('VOL',
-                      style: TextStyle(
-                          fontSize: 9, color: Colors.grey.shade400)),
+                  child: Text(
+                    'VOL',
+                    style: TextStyle(fontSize: 9, color: Colors.grey.shade400),
+                  ),
                 ),
               ),
             ],
@@ -651,11 +725,14 @@ class _ChartScreenState extends State<ChartScreen> {
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
       child: Row(
         children: [
-          Text('$h:$m',
-              style: TextStyle(
-                  fontSize: 11,
-                  color: Colors.grey.shade500,
-                  fontWeight: FontWeight.w600)),
+          Text(
+            '$h:$m',
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.grey.shade500,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
           const SizedBox(width: 10),
           _ohlcChip('O', candle.open, Colors.blue),
           _ohlcChip('H', candle.high, Colors.green),
@@ -664,10 +741,10 @@ class _ChartScreenState extends State<ChartScreen> {
           const Spacer(),
           Icon(Icons.bar_chart, size: 12, color: Colors.grey.shade400),
           const SizedBox(width: 3),
-          Text(_fmtVol(candle.volume),
-              style: TextStyle(
-                  fontSize: 11,
-                  color: Colors.grey.shade500)),
+          Text(
+            _fmtVol(candle.volume),
+            style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+          ),
         ],
       ),
     );
@@ -677,17 +754,22 @@ class _ChartScreenState extends State<ChartScreen> {
     return Padding(
       padding: const EdgeInsets.only(right: 10),
       child: RichText(
-        text: TextSpan(children: [
-          TextSpan(
+        text: TextSpan(
+          children: [
+            TextSpan(
               text: '$label ',
-              style: const TextStyle(fontSize: 10, color: Colors.grey)),
-          TextSpan(
+              style: const TextStyle(fontSize: 10, color: Colors.grey),
+            ),
+            TextSpan(
               text: value.toStringAsFixed(2),
               style: TextStyle(
-                  fontSize: 11,
-                  color: color,
-                  fontWeight: FontWeight.w600)),
-        ]),
+                fontSize: 11,
+                color: color,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
