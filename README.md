@@ -6,11 +6,22 @@ A Flutter mobile app for viewing **live stock prices** from your [Dhan](https://
 
 ## Features
 
-### Live Prices
-- Fetches real-time LTP (Last Traded Price) using Dhan's Market Feed API
-- Auto-refreshes every **2 seconds** (managed by centralized rate limiter)
+### Live Prices (WebSocket)
+- Real-time LTP via Dhan's **WebSocket binary feed** — true tick-by-tick data
+- Previous day's close sourced from **Code 6 packets** (sent on subscription)
 - Shows **% change** from previous day's closing price
-- Displays **Open, High, Low, Prev Close** on tap
+- Live connection status dot: **● LIVE** / **● Connecting** / **● Reconnecting**
+- Auto-reconnects on disconnect with 5-second backoff
+
+### Holdings / Portfolio
+- View your **long-term holdings** with live LTP refresh
+- Shows **unrealised P&L** (₹ and %) per stock + overall portfolio
+- Portfolio summary: Current Value, Total Invested, Overall P&L
+- Large number formatting: K / L / Cr
+
+### Funds Balance
+- Drawer shows **Available** and **Used** margin balance
+- Fetched from Dhan's `/v2/fundlimit` endpoint on drawer open
 
 ### Multiple Watchlists
 - Create **unlimited named watchlists** (e.g. "Nifty 50", "Bank Stocks")
@@ -21,9 +32,9 @@ A Flutter mobile app for viewing **live stock prices** from your [Dhan](https://
 - Swipe to **delete** a watchlist
 
 ### Dynamic Stock Search
-- Downloads Dhan's official **scrip master CSV** on first launch
+- Downloads Dhan's **NSE_EQ instrument list** via authenticated API on first launch
 - Cached locally — re-downloads **once per day** automatically
-- Always up to date with **newly listed stocks**
+- Falls back to full public scrip master CSV if auth endpoint fails
 - Search by symbol (e.g. `HDFC`) or company name (e.g. `Infosys`)
 
 ### Market Status
@@ -64,17 +75,20 @@ lib/
 ├── main.dart                          # App entry, theme management
 │
 ├── models/
-│   └── watchlist_model.dart           # WatchlistModel data class
+│   ├── watchlist_model.dart           # WatchlistModel data class
+│   └── holding_model.dart             # HoldingModel with P&L computed fields
 │
 ├── screens/
 │   ├── token_entry_screen.dart        # Credential input screen
-│   ├── ltp_screen.dart                # Main live prices screen
+│   ├── ltp_screen.dart                # Main live prices screen (WebSocket)
 │   ├── chart_screen.dart              # Candlestick chart with OHLC info bar
+│   ├── holdings_screen.dart           # Portfolio screen with live P&L
 │   ├── watchlist_manager_screen.dart  # Create / rename / delete watchlists
 │   └── watchlist_screen.dart          # Add / remove stocks in a watchlist
 │
 └── services/
-    ├── dhan_service.dart              # Dhan API calls (OHLC, intraday, historical)
+    ├── dhan_service.dart              # Dhan REST API calls (OHLC, charts, holdings, funds)
+    ├── dhan_feed_service.dart         # Dhan WebSocket binary feed (live prices)
     ├── rate_limiter.dart              # Centralized API rate limiter (singleton)
     ├── scrip_service.dart             # Scrip master download, parse, cache
     └── storage_service.dart           # SharedPreferences: credentials, watchlists, theme
@@ -86,7 +100,8 @@ lib/
 
 | Package | Purpose |
 |---|---|
-| `http` | API calls to Dhan |
+| `http` | REST API calls to Dhan |
+| `web_socket_channel` | WebSocket binary live feed |
 | `shared_preferences` | Local key-value storage |
 | `path_provider` | File system access for scrip cache |
 | `uuid` | Unique IDs for each watchlist |
@@ -99,10 +114,14 @@ lib/
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /v2/marketfeed/ohlc` | Live LTP + Open, High, Low |
+| `wss://api-feed.dhan.co` | WebSocket live feed (LTP, OHLC, prevClose) |
+| `GET /v2/instrument/NSE_EQ` | NSE equity instrument list (auth, small) |
+| `POST /v2/marketfeed/ohlc` | Initial LTP + OHLC (REST, startup only) |
 | `POST /v2/charts/intraday` | Intraday candlestick data (5m / 15m) |
-| `POST /v2/charts/historical` | Previous day's closing price |
-| `GET images.dhan.co/api-data/api-scrip-master.csv` | Full NSE instruments list |
+| `POST /v2/charts/historical` | Previous day's close (startup, per watchlist) |
+| `GET /v2/fundlimit` | Available and used margin balance |
+| `GET /v2/holdings` | Long-term holdings portfolio |
+| `images.dhan.co/api-data/api-scrip-master.csv` | Fallback full instrument list (no auth) |
 
 ---
 
@@ -123,9 +142,9 @@ flutter run
 
 ### First Launch
 1. Enter your **Dhan Client ID** and **Access Token**
-2. App downloads the scrip master (one-time per day)
+2. App downloads the NSE_EQ instrument list (authenticated, small file)
 3. Default watchlist loads with 5 Nifty stocks
-4. Live prices start updating every 2 seconds
+4. WebSocket connects — live prices start streaming instantly
 
 ---
 
@@ -137,23 +156,46 @@ App opens
   ↓
 Load saved credentials + watchlists + theme
   ↓
-Download scrip master CSV (if not cached today)
+Download NSE_EQ instrument list via /v2/instrument/NSE_EQ (or fallback CSV)
   ↓
-Fetch yesterday's close for each stock (historical API)
+Fetch yesterday's close for each watchlist stock (historical API)
   ↓
-Start live OHLC polling every 2 seconds
+Initial REST OHLC call (fast first paint)
+  ↓
+Connect WebSocket → subscribe → Code 6 (prevClose) + Code 4 (OHLC) stream in
+```
+
+### WebSocket Binary Protocol
+```
+Connection: wss://api-feed.dhan.co?version=2&token=…&clientId=…&authType=2
+
+Subscribe (JSON):
+  { "RequestCode": 15, "InstrumentCount": N,
+    "InstrumentList": [{"ExchangeSegment": "NSE_EQ", "SecurityId": "1333"}] }
+
+Binary packets (little-endian, 8-byte header):
+  Header: [code:u8][msgLen:u16][exchange:u8][securityId:i32]
+
+  Code 2 – Ticker   : header + LTP(f32) + time(i32)          = 16 bytes
+  Code 4 – Quote    : header + LTP + qty + time + avg +
+                      vol + sell + buy + open + close +
+                      high + low                               = 50 bytes
+  Code 6 – PrevClose: header + prevClose(f32) + OI(i32)       = 16 bytes
 ```
 
 ### % Change Calculation
 ```
 % Change = (LTP - Previous Day Close) / Previous Day Close × 100
 ```
-Previous day close is fetched once at startup via the historical API and cached in memory for the session.
+Previous day close sourced from WebSocket Code 6 packets (sent on subscription)
+and Code 4's `close` field as fallback. Also pre-loaded via historical REST API
+at startup so pull-to-refresh always shows correct values.
 
 ### Scrip Master Caching
 ```
-First launch of the day  →  Download CSV from Dhan
-                         →  Filter: NSE + EQUITY + EQ series only
+First launch of the day  →  GET /v2/instrument/NSE_EQ (auth, NSE_EQ only)
+                            Fallback: download full CSV from Dhan CDN
+                         →  Filter: EQUITY + EQ series only
                          →  Save as JSON to device storage
 Same day relaunch        →  Load from local JSON cache (instant)
 Next day                 →  Re-download fresh copy
@@ -173,65 +215,44 @@ Next day                 →  Re-download fresh copy
 | **Data APIs** (charts/intraday, charts/historical) | **5 req/sec** | — | — | 100,000/day |
 | **Order APIs** | 10 req/sec | 250 | 1,000 | 7,000 |
 | **Non-Trading APIs** | 20 req/sec | Unlimited | Unlimited | Unlimited |
-| Order Modifications | — | — | — | Max 25/order |
+
+### WebSocket Limits
+
+| Limit | Value |
+|---|---|
+| Max simultaneous connections | 5 |
+| Max instruments per connection | 5,000 |
+| Max instruments per subscription message | 100 |
+| Server ping interval | Every 10 seconds |
+| Connection timeout (no pong) | 40 seconds |
 
 ### How This App Handles Rate Limits
 
-| Action | API Used | Category | Frequency |
-|---|---|---|---|
-| Live price polling | `POST /v2/marketfeed/ohlc` | Quote | Every 2 seconds |
-| Intraday chart | `POST /v2/charts/intraday` | Data | On demand (user opens chart) |
-| Prev close at startup | `POST /v2/charts/historical` | Data | On startup per stock |
-| Intraday chart load | `POST /v2/charts/intraday` | Data | On demand (user tap) |
+| Action | Method | Frequency |
+|---|---|---|
+| Live price updates | WebSocket push | Real-time (per trade) |
+| Initial OHLC display | REST (`/v2/marketfeed/ohlc`) | Once at startup |
+| Prev close loading | REST (`/v2/charts/historical`) | Once per watchlist load |
+| Chart data | REST (`/v2/charts/intraday`) | On demand |
+| Funds balance | REST (`/v2/fundlimit`) | On drawer open |
+| Holdings | REST (`/v2/holdings`) | On screen open |
 
 ### Centralized Rate Limiter (`lib/services/rate_limiter.dart`)
 
-The app uses a **centralized watchman** — a `RateLimiter` singleton that every API call must pass through before hitting Dhan's servers. This prevents 429 errors entirely.
-
-**How it works:**
-- Uses a **sliding window algorithm** — tracks timestamps of recent requests per category
-- If a call would exceed the per-second limit, it **automatically waits** the exact milliseconds needed, then proceeds
-- If the daily limit is hit, it throws a `RateLimitDailyException` with a clear message
-- No manual `Future.delayed` scattered across the code — the limiter handles all spacing
+The app uses a **centralized watchman** — a `RateLimiter` singleton that every REST API call must pass through. This prevents 429 errors entirely.
 
 **Usage in code:**
 ```dart
-// Before every API call in DhanService:
 await RateLimiter.instance.acquire(ApiCategory.quote); // for marketfeed/*
 await RateLimiter.instance.acquire(ApiCategory.data);  // for charts/*
 ```
-
-**Monitor current usage at runtime:**
-```dart
-final stats = RateLimiter.instance.stats;
-// e.g. "Quote: 144 today | Data: 30/100000 today (0.0%)"
-print(stats);
-```
-
-**Reset (useful for testing):**
-```dart
-RateLimiter.instance.reset();
-```
-
-### WebSocket Alternative (Future Improvement)
-
-Dhan provides a **Live Market Feed via WebSocket** which is far more efficient than polling:
-- Up to **5 WebSocket connections** per user
-- Up to **5,000 instruments per connection**
-- Max **100 instruments per subscription message**
-- Supports 3 modes: **Ticker** (LTP only), **Quote** (OHLC + volume), **Full** (market depth)
-- Includes **Previous Day Close** in all modes — no separate historical call needed
-- Server sends **ping every 10 seconds**; connection closes if no pong within 40 seconds
-- Endpoint: `wss://api-feed.dhan.co?version=2&token=<token>&clientId=<id>&authType=2`
-
-> **Note:** Switching to WebSocket would eliminate the 5-second polling delay, remove rate limit concerns entirely, and provide true tick-by-tick data. This is the recommended upgrade path for this app.
 
 ---
 
 ## Notes
 
 - All credentials are stored **locally on your device only**
-- The scrip master is downloaded from Dhan's **official public URL** — no auth required
+- WebSocket connection uses the same access token as REST APIs
 - Dark mode and watchlist configuration persist across app restarts
 
 ---
@@ -256,34 +277,39 @@ Dhan provides a **Live Market Feed via WebSocket** which is far more efficient t
 ### 4. Rate Limiting (HTTP 429)
 **Problem:** App started getting rate limit errors from Dhan.
 **Cause:** Were making 2 parallel API calls (LTP + OHLC) every 3 seconds, exceeding the 1 req/sec limit.
-**Fix:** Consolidated to a single OHLC call and slowed the timer to 5 seconds.
+**Fix:** Consolidated to a single OHLC call and added centralized rate limiter.
 
 ### 5. % Change Showing 0% or Wrong Value
 **Problem:** All stocks showed 0.00% change.
 **Cause:** `ohlc.close` equals `ltp` when the market is closed — both reflect the last traded price.
-**Fix:** Fetch yesterday's closing price via the historical API at startup, cache in memory, use for % calculation.
+**Fix:** Fetch yesterday's closing price via the historical API at startup. WebSocket Code 6 packets also provide prevClose on subscription.
 
 ### 6. DH-905 Error from Historical API
 **Problem:** Historical API returned error code DH-905 when requesting a single day's data.
 **Cause:** No trading data exists for the specific date requested (e.g. weekend or holiday).
-**Fix:** Fetch a 7-day range (`toDate = today - 1`, `fromDate = today - 7`) and use the last available close value.
+**Fix:** Fetch a 7-day range and use the last available close value.
 
-### 7. Historical Calls Triggering Rate Limits
-**Problem:** Fetching prev close for 5+ stocks at startup caused 429 errors.
-**Cause:** Simultaneous historical API calls exceeded the rate limit.
-**Fix:** Staggered calls 400ms apart using `Future.delayed`.
+### 7. DH-1111 Error from Holdings API
+**Problem:** `GET /v2/holdings` returned HTTP 500 with `errorCode: "DH-1111"`.
+**Cause:** Dhan returns HTTP 500 (not 404) when the account has no holdings — poor API design.
+**Fix:** Detect the specific `DH-1111` error code and treat it as an empty holdings list.
 
-### 8. MissingPluginException for shared_preferences
+### 8. % Change Resets to 0% After Watchlist Switch
+**Problem:** Switching watchlists then pulling to refresh showed 0% change for all stocks.
+**Cause:** `loadPrevCloses()` only ran at startup for the initial watchlist. New watchlist stocks had no cached prevClose, so the REST pull-to-refresh built quotes with prevClose=0.
+**Fix:** Fire `loadPrevCloses()` in the background after every watchlist switch so the REST fallback always has correct prevClose values. WebSocket Code 6 handles the immediate live display.
+
+### 9. MissingPluginException for shared_preferences
 **Problem:** App crashed with `MissingPluginException` after adding `shared_preferences`.
 **Cause:** Native plugins require a full rebuild — hot reload / hot restart is not enough.
 **Fix:** Stop the app and run `flutter run` from scratch to trigger a full rebuild.
 
-### 9. Windows Developer Mode Required
+### 10. Windows Developer Mode Required
 **Problem:** `flutter run` failed with a symlink permission error on Windows.
 **Cause:** Flutter creates symlinks for plugin packages, which require Developer Mode on Windows.
 **Fix:** Enable Developer Mode via `Settings → Privacy & Security → For Developers`.
 
-### 10. Private Field Access Across Files
+### 11. Private Field Access Across Files
 **Problem:** `ltp_screen.dart` could not access `_isDark` from `_MyAppState`.
 **Cause:** Dart's `_` prefix makes fields private to the file they are declared in, not just the class.
 **Fix:** Added a public getter `bool get isDark => _isDark;` in `_MyAppState`.
@@ -292,23 +318,23 @@ Dhan provides a **Live Market Feed via WebSocket** which is far more efficient t
 
 ## Future Considerations
 
+### F&O (Futures & Options) Support
+Dhan API supports `NSE_FNO` segment for index/stock futures and call/put options. Adding F&O would require: downloading the F&O scrip master (50,000+ instruments), an option chain UI (strike × expiry × CE/PE), and updating WebSocket subscriptions to use `NSE_FNO` exchange segment.
+
 ### Token Expiry
-Dhan access tokens expire daily. The app has no way to detect expiry — it simply fails to fetch prices. A future improvement would be to detect 401 responses and prompt the user to re-enter their token automatically.
+Dhan access tokens expire daily. The app detects 401/403 responses and shows an "Update Token" prompt, but cannot auto-refresh. Consider integrating Dhan's OAuth flow if it becomes available.
 
 ### Market Holidays
-The **Market Open** badge is based purely on clock time (9:15 AM – 3:30 PM, Mon–Fri). It does not account for Indian stock market holidays. A holiday calendar or a live market-status API call would make this accurate.
+The **Market Open** badge is based purely on clock time (9:15 AM – 3:30 PM, Mon–Fri). It does not account for Indian stock market holidays.
 
 ### Credential Security
-Credentials are stored using `shared_preferences`, which saves to a plain-text XML file on Android. For production use, consider `flutter_secure_storage` which uses Android Keystore / iOS Keychain for encrypted storage.
-
-### Large Watchlist Performance
-The scrip master CSV contains ~80,000+ rows. Parsing and searching is done in-memory. On low-end devices, the initial load may be slow. A future improvement would be to move parsing to an isolate or use a local SQLite database.
+Credentials are stored using `shared_preferences` (plain-text on Android). For production use, consider `flutter_secure_storage` which uses Android Keystore / iOS Keychain.
 
 ### No Background Refresh
-Prices only update while the app is in the foreground. There is no background service or push notification for price alerts. This is intentional (to stay within rate limits) but limits real-time monitoring use cases. The `RateLimiter` daily counter also resets on app restart — for true daily tracking, counts should be persisted to `shared_preferences`.
+Prices only update while the app is in the foreground. No background service or price alerts. The WebSocket disconnects when the app is backgrounded and reconnects on foreground.
 
 ### Historical API on Weekends
-When the app is opened on a weekend, the historical API returns data through Friday. This works correctly, but the "previous close" is technically 2+ days old. Consider labeling the % change as "vs Fri Close" on weekends.
+When the app is opened on a weekend, the "previous close" is technically Friday's close. Consider labeling the % change as "vs Fri Close" on weekends.
 
 ### No State Management Library
-The app uses `setState` and `MyApp.of(context)` for state sharing. For a larger app, adopting a proper state management solution (Provider, Riverpod, or Bloc) would improve maintainability and testability.
+The app uses `setState` and `MyApp.of(context)` for state sharing. For a larger app, adopting Riverpod or Bloc would improve maintainability.
