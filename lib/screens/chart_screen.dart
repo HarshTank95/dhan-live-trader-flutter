@@ -234,7 +234,6 @@ class _ChartScreenState extends State<ChartScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final color = widget.isPositive ? Colors.green : Colors.red;
     final arrow = widget.isPositive ? '▲' : '▼';
     final isDark = Theme.of(context).brightness == Brightness.dark;
 

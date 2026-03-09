@@ -7,6 +7,7 @@ import '../services/dhan_service.dart'
 import '../services/scrip_service.dart';
 import '../services/storage_service.dart';
 import 'chart_screen.dart';
+import 'holdings_screen.dart';
 import 'token_entry_screen.dart';
 import 'watchlist_manager_screen.dart';
 
@@ -42,6 +43,10 @@ class _LtpScreenState extends State<LtpScreen> {
   Timer? _timer;
   DateTime? _lastUpdated;
   SortMode _sortMode = SortMode.changeDesc;
+
+  // Funds / balance
+  Map<String, double>? _funds;
+  bool _fundsLoading = false;
 
   WatchlistModel? get _activeWatchlist {
     try {
@@ -227,6 +232,30 @@ class _LtpScreenState extends State<LtpScreen> {
       MaterialPageRoute(builder: (_) => const TokenEntryScreen()),
       (_) => false,
     );
+  }
+
+  Future<void> _fetchFunds() async {
+    if (_fundsLoading) return;
+    setState(() => _fundsLoading = true);
+    try {
+      final funds = await _service.fetchFunds();
+      if (mounted) setState(() { _funds = funds; _fundsLoading = false; });
+    } catch (_) {
+      if (mounted) setState(() => _fundsLoading = false);
+    }
+  }
+
+  void _openHoldings() {
+    _timer?.cancel();
+    Navigator.pop(context); // close drawer
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => HoldingsScreen(dhanService: _service),
+      ),
+    ).then((_) {
+      _timer = Timer.periodic(const Duration(seconds: 2), (_) => _fetchLTP());
+    });
   }
 
   void _showStockDetail(StockQuote q) {
@@ -514,6 +543,7 @@ class _LtpScreenState extends State<LtpScreen> {
             ),
         ],
       ),
+      onDrawerChanged: (opened) { if (opened) _fetchFunds(); },
       drawer: _buildDrawer(isDark),
       body: RefreshIndicator(
         onRefresh: _fetchLTP,
@@ -584,6 +614,94 @@ class _LtpScreenState extends State<LtpScreen> {
             child: ListView(
               padding: EdgeInsets.zero,
               children: [
+                // ── Funds card ───────────────────────────────────────
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                  child: _fundsLoading
+                      ? Container(
+                          height: 62,
+                          decoration: BoxDecoration(
+                            color: isDark
+                                ? Colors.grey.shade800
+                                : Colors.grey.shade100,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Center(
+                            child: SizedBox(
+                              width: 18, height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ),
+                        )
+                      : _funds != null
+                          ? Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 12),
+                              decoration: BoxDecoration(
+                                color: isDark
+                                    ? Colors.grey.shade800
+                                    : Colors.blue.shade50,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: isDark
+                                      ? Colors.grey.shade700
+                                      : Colors.blue.shade100,
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text('Available',
+                                            style: TextStyle(
+                                                fontSize: 10,
+                                                color: Colors.grey.shade500)),
+                                        Text(
+                                          '₹${_fmtFunds(_funds!['available']!)}',
+                                          style: const TextStyle(
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.green),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  Container(
+                                    width: 1, height: 32,
+                                    color: Colors.grey.withValues(alpha: 0.25),
+                                  ),
+                                  Expanded(
+                                    child: Padding(
+                                      padding:
+                                          const EdgeInsets.only(left: 12),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text('Used',
+                                              style: TextStyle(
+                                                  fontSize: 10,
+                                                  color: Colors.grey.shade500)),
+                                          Text(
+                                            '₹${_fmtFunds(_funds!['used']!)}',
+                                            style: const TextStyle(
+                                                fontSize: 14,
+                                                fontWeight: FontWeight.bold,
+                                                color: Colors.orange),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : const SizedBox.shrink(),
+                ),
+
                 const SizedBox(height: 12),
 
                 // Watchlists section
@@ -630,6 +748,12 @@ class _LtpScreenState extends State<LtpScreen> {
 
                 // Account section
                 _sectionLabel('ACCOUNT'),
+                _drawerTile(
+                  icon: Icons.pie_chart_outline_rounded,
+                  label: 'Holdings / Portfolio',
+                  iconColor: const Color(0xFF6750A4),
+                  onTap: _openHoldings,
+                ),
                 _drawerTile(
                   icon: Icons.manage_accounts_outlined,
                   label: 'Edit Credentials',
@@ -695,6 +819,13 @@ class _LtpScreenState extends State<LtpScreen> {
         ],
       ),
     );
+  }
+
+  String _fmtFunds(double val) {
+    if (val >= 1e7) return '${(val / 1e7).toStringAsFixed(2)}Cr';
+    if (val >= 1e5) return '${(val / 1e5).toStringAsFixed(2)}L';
+    if (val >= 1e3) return '${(val / 1e3).toStringAsFixed(1)}K';
+    return val.toStringAsFixed(2);
   }
 
   Widget _sectionLabel(String text) => Padding(

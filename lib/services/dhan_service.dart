@@ -3,6 +3,7 @@ import 'package:http/http.dart' as http;
 import 'package:candlesticks/candlesticks.dart';
 import 'rate_limiter.dart';
 import 'scrip_service.dart';
+import '../models/holding_model.dart';
 
 // Typed exceptions for better error handling in UI
 class DhanAuthException implements Exception {
@@ -285,6 +286,123 @@ class DhanService {
     }
     // candlesticks package expects newest first
     return candles.reversed.toList();
+  }
+
+  // ── Funds / margin balance ───────────────────────────────────────────
+  Future<Map<String, double>> fetchFunds() async {
+    await RateLimiter.instance.acquire(ApiCategory.quote);
+
+    http.Response response;
+    try {
+      response = await http.get(
+        Uri.parse('$_baseUrl/v2/fundlimit'),
+        headers: {
+          'access-token': accessToken,
+          'client-id': clientId,
+          'Accept': 'application/json',
+        },
+      );
+    } catch (e) {
+      throw DhanNetworkException('No internet connection or server unreachable');
+    }
+
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      throw DhanAuthException('Access token expired or invalid.');
+    }
+    if (response.statusCode != 200) {
+      throw Exception('API error (${response.statusCode})');
+    }
+
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    // Note: Dhan API has a typo — "availabelBalance" (not "availableBalance")
+    final available = (json['availabelBalance'] as num?)?.toDouble() ?? 0;
+    final used = (json['utilizedAmount'] as num?)?.toDouble() ?? 0;
+    final withdrawable = (json['withdrawableBalance'] as num?)?.toDouble() ?? 0;
+    return {
+      'available': available,
+      'used': used,
+      'total': available + used,
+      'withdrawable': withdrawable,
+    };
+  }
+
+  // ── Holdings (long-term portfolio) ───────────────────────────────────
+  Future<List<HoldingModel>> fetchHoldings() async {
+    await RateLimiter.instance.acquire(ApiCategory.data);
+
+    http.Response response;
+    try {
+      response = await http.get(
+        Uri.parse('$_baseUrl/v2/holdings'),
+        headers: {
+          'access-token': accessToken,
+          'client-id': clientId,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+      );
+    } catch (e) {
+      throw DhanNetworkException('No internet connection or server unreachable');
+    }
+
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      throw DhanAuthException('Access token expired or invalid.');
+    }
+    // Dhan returns 500 + DH-1111 when account has no holdings — treat as empty
+    if (response.statusCode == 500) {
+      try {
+        final err = jsonDecode(response.body) as Map<String, dynamic>;
+        if (err['errorCode'] == 'DH-1111') return [];
+      } catch (_) {}
+      throw Exception('HTTP 500: ${response.body}');
+    }
+    if (response.statusCode != 200) {
+      throw Exception('HTTP ${response.statusCode}: ${response.body}');
+    }
+
+    final decoded = jsonDecode(response.body);
+    if (decoded is! List) return [];
+    return (decoded as List<dynamic>)
+        .map((e) => HoldingModel.fromJson(e as Map<String, dynamic>))
+        .where((h) => h.totalQty > 0)
+        .toList();
+  }
+
+  // ── Live LTP for a list of security IDs (used by Holdings screen) ───
+  Future<Map<int, double>> fetchOhlcForIds(List<int> ids) async {
+    if (ids.isEmpty) return {};
+    await RateLimiter.instance.acquire(ApiCategory.quote);
+
+    http.Response response;
+    try {
+      response = await http.post(
+        Uri.parse('$_baseUrl/v2/marketfeed/ohlc'),
+        headers: {
+          'access-token': accessToken,
+          'client-id': clientId,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: jsonEncode({'NSE_EQ': ids}),
+      );
+    } catch (e) {
+      throw DhanNetworkException('No internet connection or server unreachable');
+    }
+
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      throw DhanAuthException('Access token expired or invalid.');
+    }
+    if (response.statusCode != 200) return {};
+
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    final nseData = json['data']?['NSE_EQ'] as Map<String, dynamic>? ?? {};
+
+    return {
+      for (final entry in nseData.entries)
+        if (int.tryParse(entry.key) != null)
+          int.parse(entry.key):
+              (entry.value['last_price'] as num?)?.toDouble() ?? 0,
+    };
   }
 
   String _fmt(DateTime d) =>
