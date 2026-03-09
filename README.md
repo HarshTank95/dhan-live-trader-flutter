@@ -60,6 +60,7 @@ A Flutter mobile app for viewing **live stock prices** from your [Dhan](https://
 - Modern side drawer with gradient header
 - Stock detail bottom sheet on tap
 - Branded splash screen (blue theme)
+- **Gainers / Losers summary** in the bottom bar: `▲ 12  ▼ 8  — 2` alongside the live status dot
 
 ### Credentials
 - Enter Dhan **Client ID** and **Access Token** once

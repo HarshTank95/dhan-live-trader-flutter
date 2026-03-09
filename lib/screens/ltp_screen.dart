@@ -942,6 +942,10 @@ class _LtpScreenState extends State<LtpScreen> {
     );
   }
 
+  int get _gainers => _quotes.where((q) => q.changePercent > 0).length;
+  int get _losers  => _quotes.where((q) => q.changePercent < 0).length;
+  int get _flat    => _quotes.where((q) => q.changePercent == 0).length;
+
   Widget _buildBody() {
     if (_isLoadingScrips) {
       return const Center(
@@ -1137,11 +1141,11 @@ class _LtpScreenState extends State<LtpScreen> {
           ),
         ),
         Container(
-          padding: const EdgeInsets.all(10),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           color: Theme.of(context).colorScheme.surfaceContainerHighest,
           child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
             children: [
+              // ● LIVE status
               Container(
                 width: 7, height: 7,
                 decoration: BoxDecoration(
@@ -1170,6 +1174,29 @@ class _LtpScreenState extends State<LtpScreen> {
                   },
                 ),
               ),
+              // Gainers / Losers summary
+              if (_quotes.isNotEmpty) ...[
+                const Spacer(),
+                Text('▲ $_gainers',
+                    style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.green)),
+                const SizedBox(width: 10),
+                Text('▼ $_losers',
+                    style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.red)),
+                if (_flat > 0) ...[
+                  const SizedBox(width: 10),
+                  Text('— $_flat',
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.grey.shade500)),
+                ],
+              ],
             ],
           ),
         ),
