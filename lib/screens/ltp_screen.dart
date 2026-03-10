@@ -41,7 +41,6 @@ class _LtpScreenState extends State<LtpScreen> {
   bool _isAuthError = false;
   bool _isNetworkError = false;
   bool _isRateLimitError = false;
-  DateTime? _lastUpdated;
   SortMode _sortMode = SortMode.changeDesc;
 
   // WebSocket live feed
@@ -153,7 +152,6 @@ class _LtpScreenState extends State<LtpScreen> {
 
     setState(() {
       _quotes = _sorted(newQuotes);
-      _lastUpdated = DateTime.now();
       _isLoading = false;
       _error = null;
       _isAuthError = false;
@@ -201,8 +199,7 @@ class _LtpScreenState extends State<LtpScreen> {
         _isAuthError = false;
         _isNetworkError = false;
         _isRateLimitError = false;
-        _lastUpdated = DateTime.now();
-      });
+        });
     } on DhanAuthException catch (e) {
       setState(() {
         _isLoading = false;
@@ -282,6 +279,42 @@ class _LtpScreenState extends State<LtpScreen> {
       _applyActiveWatchlist();
       unawaited(_service.loadPrevCloses());
       _feedService?.resubscribe(_getActiveSecurityIds());
+    }
+  }
+
+  Future<void> _addStockToWatchlist(ScripInfo scrip) async {
+    final wl = _activeWatchlist;
+    if (wl == null) return;
+
+    if (wl.stockIds.contains(scrip.securityId)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${scrip.symbol} is already in ${wl.name}')),
+      );
+      return;
+    }
+    if (wl.stockIds.length >= 20) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Watchlist is full (max 20 stocks)')),
+      );
+      return;
+    }
+
+    final updated = wl.copyWith(stockIds: [...wl.stockIds, scrip.securityId]);
+    final idx = _watchlists.indexWhere((w) => w.id == wl.id);
+    setState(() {
+      _watchlists[idx] = updated;
+      _isLoading = true;
+      _quotes = [];
+    });
+    await StorageService.saveAllWatchlists(_watchlists);
+    _applyActiveWatchlist();
+    unawaited(_service.loadPrevCloses());
+    _feedService?.resubscribe(_getActiveSecurityIds());
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${scrip.symbol} added to ${wl.name}')),
+      );
     }
   }
 
@@ -503,14 +536,6 @@ class _LtpScreenState extends State<LtpScreen> {
     super.dispose();
   }
 
-  String _formatTime(DateTime dt) {
-    final period = dt.hour >= 12 ? 'PM' : 'AM';
-    final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
-    final m = dt.minute.toString().padLeft(2, '0');
-    final s = dt.second.toString().padLeft(2, '0');
-    return '$h:$m:$s $period';
-  }
-
   bool get _isMarketOpen {
     final now =
         DateTime.now().toUtc().add(const Duration(hours: 5, minutes: 30));
@@ -604,21 +629,87 @@ class _LtpScreenState extends State<LtpScreen> {
             ],
           ),
 
-          if (_lastUpdated != null)
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: Center(
-                child: Text(_formatTime(_lastUpdated!),
-                    style: const TextStyle(fontSize: 11, color: Colors.grey)),
-              ),
-            ),
         ],
       ),
       onDrawerChanged: (opened) { if (opened) _fetchFunds(); },
       drawer: _buildDrawer(isDark),
-      body: RefreshIndicator(
-        onRefresh: _fetchLTP,
-        child: _buildBody(),
+      body: Column(
+        children: [
+          // ── Search bar ────────────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+            child: Material(
+              elevation: 2,
+              shadowColor: Colors.blue.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(14),
+              child: InkWell(
+                onTap: () async {
+                  if (!_scripService.isLoaded) return;
+                  final scrip = await showSearch<ScripInfo?>(
+                    context: context,
+                    delegate: _StockSearchDelegate(_scripService),
+                  );
+                  if (scrip != null && mounted) _addStockToWatchlist(scrip);
+                },
+                borderRadius: BorderRadius.circular(14),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: Colors.blue.withValues(alpha: 0.25),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: Colors.blue.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Icon(Icons.search, size: 16, color: Colors.blue),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          'Search & add stocks...',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: isDark ? Colors.grey.shade400 : Colors.grey.shade500,
+                          ),
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.blue.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Text(
+                          '+ Add',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.blue,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // ── Stock list ────────────────────────────────────────────────
+          Expanded(
+            child: RefreshIndicator(
+              onRefresh: _fetchLTP,
+              child: _buildBody(),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1201,6 +1292,80 @@ class _LtpScreenState extends State<LtpScreen> {
           ),
         ),
       ],
+    );
+  }
+}
+
+// ── Stock search delegate ─────────────────────────────────────────────────────
+
+class _StockSearchDelegate extends SearchDelegate<ScripInfo?> {
+  final ScripService scripService;
+
+  _StockSearchDelegate(this.scripService);
+
+  @override
+  String get searchFieldLabel => 'Search stocks...';
+
+  @override
+  List<Widget> buildActions(BuildContext context) => [
+        if (query.isNotEmpty)
+          IconButton(
+            icon: const Icon(Icons.clear),
+            onPressed: () => query = '',
+          ),
+      ];
+
+  @override
+  Widget buildLeading(BuildContext context) => IconButton(
+        icon: const Icon(Icons.arrow_back),
+        onPressed: () => close(context, null),
+      );
+
+  @override
+  Widget buildResults(BuildContext context) => _buildList(context);
+
+  @override
+  Widget buildSuggestions(BuildContext context) => _buildList(context);
+
+  Widget _buildList(BuildContext context) {
+    final results = scripService.search(query);
+    if (results.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.search_off, size: 48, color: Colors.grey.shade400),
+            const SizedBox(height: 12),
+            Text(
+              query.isEmpty ? 'Type to search stocks' : 'No stocks found for "$query"',
+              style: const TextStyle(color: Colors.grey),
+            ),
+          ],
+        ),
+      );
+    }
+    return ListView.builder(
+      itemCount: results.length,
+      itemBuilder: (context, index) {
+        final scrip = results[index];
+        return ListTile(
+          leading: CircleAvatar(
+            backgroundColor: Colors.blue.shade50,
+            child: Text(
+              scrip.symbol[0],
+              style: const TextStyle(
+                  color: Colors.blue, fontWeight: FontWeight.bold),
+            ),
+          ),
+          title: Text(scrip.symbol,
+              style: const TextStyle(fontWeight: FontWeight.bold)),
+          subtitle: Text(scrip.name,
+              style: const TextStyle(fontSize: 12),
+              overflow: TextOverflow.ellipsis),
+          trailing: const Icon(Icons.add_circle_outline, color: Colors.blue),
+          onTap: () => close(context, scrip),
+        );
+      },
     );
   }
 }

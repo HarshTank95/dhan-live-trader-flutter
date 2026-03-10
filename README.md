@@ -10,7 +10,7 @@ A Flutter mobile app for viewing **live stock prices** from your [Dhan](https://
 - Real-time LTP via Dhan's **WebSocket binary feed** — true tick-by-tick data
 - Previous day's close sourced from **Code 6 packets** (sent on subscription)
 - Shows **% change** from previous day's closing price
-- Live connection status dot: **● LIVE** / **● Connecting** / **● Reconnecting**
+- Live connection status dot: **● LIVE** (market open) / **● Connected** (market closed) / **● Connecting** / **● Reconnecting**
 - Auto-reconnects on disconnect with 5-second backoff
 
 ### Holdings / Portfolio
@@ -36,6 +36,8 @@ A Flutter mobile app for viewing **live stock prices** from your [Dhan](https://
 - Cached locally — re-downloads **once per day** automatically
 - Falls back to full public scrip master CSV if auth endpoint fails
 - Search by symbol (e.g. `HDFC`) or company name (e.g. `Infosys`)
+- **Search bar on home screen** — tap to search and add stocks directly to the active watchlist
+- Duplicate and full-watchlist (20 stocks) guards with snackbar feedback
 
 ### Market Status
 - Shows **Market Open / Closed** badge in app bar
@@ -49,8 +51,11 @@ A Flutter mobile app for viewing **live stock prices** from your [Dhan](https://
 ### Candlestick Chart
 - Tap any stock → detail sheet → **View Chart** button
 - **5 min** and **15 min** intraday intervals
+- **Live candles** — current candle updates tick-by-tick via WebSocket (H/L/C update in real time)
+- New candle automatically inserted when interval boundary is crossed
 - Scroll left to auto-load previous trading days (handles weekends + holidays)
-- **Touch any candle** to see its OHLC + volume in the info bar
+- **Touch any candle** to see OHLC + volume inside the chart
+- Volume shown in the VOL overlay — displays actual value (blue) when hovering a candle
 - **Jump to latest** toolbar button to snap back to today's candles
 - Filtered to **market hours only** (9:15 AM – 3:30 PM IST)
 
@@ -61,6 +66,7 @@ A Flutter mobile app for viewing **live stock prices** from your [Dhan](https://
 - Stock detail bottom sheet on tap
 - Branded splash screen (blue theme)
 - **Gainers / Losers summary** in the bottom bar: `▲ 12  ▼ 8  — 2` alongside the live status dot
+- **Search bar** below the app bar for quick stock discovery and adding
 
 ### Credentials
 - Enter Dhan **Client ID** and **Access Token** once
@@ -314,6 +320,16 @@ await RateLimiter.instance.acquire(ApiCategory.data);  // for charts/*
 **Problem:** `ltp_screen.dart` could not access `_isDark` from `_MyAppState`.
 **Cause:** Dart's `_` prefix makes fields private to the file they are declared in, not just the class.
 **Fix:** Added a public getter `bool get isDark => _isDark;` in `_MyAppState`.
+
+### 12. LIVE + Closed Labels Contradicting Each Other
+**Problem:** Bottom bar showed `● LIVE` (green) while app bar showed `● Closed` (red) at the same time.
+**Cause:** These are two different states — WebSocket connection status vs. market trading hours. Both were correct but looked contradictory.
+**Fix:** Show `● LIVE` only when market is open AND feed is connected. Show `● Connected` when feed is active but market is closed.
+
+### 13. Duplicate OHLC Display in Chart
+**Problem:** OHLC values appeared both inside the chart (package's built-in info bar on long-press) and in a separate row outside the chart where the interval selector normally sits.
+**Cause:** The external row showed stale data and had no clear purpose once the package's built-in display was working.
+**Fix:** Removed the external OHLC row entirely. OHLC is now shown only inside the chart on long-press, which is the correct location.
 
 ---
 
