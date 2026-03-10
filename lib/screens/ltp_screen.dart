@@ -1160,7 +1160,7 @@ class _LtpScreenState extends State<LtpScreen> {
               const SizedBox(width: 6),
               Text(
                 switch (_feedStatus) {
-                  FeedStatus.connected => 'LIVE',
+                  FeedStatus.connected => _isMarketOpen ? 'LIVE' : 'Connected',
                   FeedStatus.connecting => 'Connecting...',
                   FeedStatus.disconnected => 'Reconnecting...',
                 },

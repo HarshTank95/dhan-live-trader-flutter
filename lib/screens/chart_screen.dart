@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'package:candlesticks/candlesticks.dart';
 import 'package:flutter/material.dart';
+import '../services/dhan_feed_service.dart';
 import '../services/dhan_service.dart';
 
 enum _Interval { m5, m15 }
@@ -74,11 +76,107 @@ class _ChartScreenState extends State<ChartScreen> {
   double _pkgScrollDragStartX = 0;
   static const _defaultCandleWidth = 6.0; // package default before any zoom
 
+  // ── Live feed ────────────────────────────────────────────────────────────
+  DhanFeedService? _feed;
+  StreamSubscription<Map<int, FeedUpdate>>? _feedSub;
+
+  // Live price state (updates in real-time from WebSocket)
+  late double _liveLtp;
+  late double _liveOpen;
+  late double _liveHigh;
+  late double _liveLow;
+
+  double get _liveChange =>
+      widget.prevClose > 0 ? _liveLtp - widget.prevClose : 0;
+  double get _liveChangePercent =>
+      widget.prevClose > 0 ? (_liveChange / widget.prevClose) * 100 : 0;
+  bool get _liveIsPositive => _liveChange >= 0;
+
   @override
   void initState() {
     super.initState();
+    _liveLtp = widget.ltp;
+    _liveOpen = widget.open;
+    _liveHigh = widget.high;
+    _liveLow = widget.low;
     _oldestLoadedDate = DateTime.now();
     _loadChart();
+    _startFeed();
+  }
+
+  void _startFeed() {
+    _feed = DhanFeedService(
+      clientId: widget.dhanService.clientId,
+      accessToken: widget.dhanService.accessToken,
+    );
+    _feedSub = _feed!.dataStream.listen((data) {
+      final u = data[widget.securityId];
+      if (u == null || u.ltp <= 0) return;
+      _onTick(u);
+    });
+    _feed!.connect([widget.securityId]);
+  }
+
+  void _onTick(FeedUpdate u) {
+    final ltp = u.ltp;
+    setState(() {
+      _liveLtp = ltp;
+      if (u.open > 0) _liveOpen = u.open;
+      if (ltp > _liveHigh) _liveHigh = ltp;
+      if (ltp < _liveLow || _liveLow == 0) _liveLow = ltp;
+    });
+    _updateCurrentCandle(ltp);
+  }
+
+  void _updateCurrentCandle(double ltp) {
+    if (_candles.isEmpty) return;
+
+    final ist = DateTime.now().toUtc().add(const Duration(hours: 5, minutes: 30));
+    final intervalMins = _selectedInterval == _Interval.m5 ? 5 : 15;
+    final latest = _candles[0];
+    final candleEnd = latest.date.add(Duration(minutes: intervalMins));
+
+    if (ist.isBefore(candleEnd)) {
+      // Still inside the current candle — update H/L/C
+      setState(() {
+        _candles[0] = Candle(
+          date: latest.date,
+          open: latest.open,
+          high: ltp > latest.high ? ltp : latest.high,
+          low: ltp < latest.low ? ltp : latest.low,
+          close: ltp,
+          volume: latest.volume,
+        );
+      });
+    } else {
+      // New interval started — add a fresh forming candle
+      final newDate = _alignToInterval(ist, intervalMins);
+      setState(() {
+        _candles.insert(
+          0,
+          Candle(
+            date: newDate,
+            open: ltp,
+            high: ltp,
+            low: ltp,
+            close: ltp,
+            volume: 0,
+          ),
+        );
+      });
+    }
+  }
+
+  DateTime _alignToInterval(DateTime dt, int mins) {
+    final m = (dt.minute ~/ mins) * mins;
+    return DateTime(dt.year, dt.month, dt.day, dt.hour, m);
+  }
+
+  @override
+  void dispose() {
+    _feedSub?.cancel();
+    _feed?.dispose();
+    super.dispose();
   }
 
   // Minimum candles needed to fill the screen (~6px each, ~330px usable)
@@ -247,7 +345,7 @@ class _ChartScreenState extends State<ChartScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final arrow = widget.isPositive ? '▲' : '▼';
+    final arrow = _liveIsPositive ? '▲' : '▼';
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return Scaffold(
@@ -326,14 +424,14 @@ class _ChartScreenState extends State<ChartScreen> {
                     ),
                   ),
 
-                  // Price row
+                  // Price row — live via WebSocket
                   Padding(
                     padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
                         Text(
-                          '₹${widget.ltp.toStringAsFixed(2)}',
+                          '₹${_liveLtp.toStringAsFixed(2)}',
                           style: const TextStyle(
                             color: Colors.white,
                             fontSize: 32,
@@ -350,20 +448,20 @@ class _ChartScreenState extends State<ChartScreen> {
                               vertical: 4,
                             ),
                             decoration: BoxDecoration(
-                              color: widget.isPositive
+                              color: _liveIsPositive
                                   ? Colors.green.withValues(alpha: 0.25)
                                   : Colors.red.withValues(alpha: 0.25),
                               borderRadius: BorderRadius.circular(20),
                               border: Border.all(
-                                color: widget.isPositive
+                                color: _liveIsPositive
                                     ? Colors.green.shade300
                                     : Colors.red.shade300,
                               ),
                             ),
                             child: Text(
-                              '$arrow ${widget.change.abs().toStringAsFixed(2)}  (${widget.changePercent.toStringAsFixed(2)}%)',
+                              '$arrow ${_liveChange.abs().toStringAsFixed(2)}  (${_liveChangePercent.toStringAsFixed(2)}%)',
                               style: TextStyle(
-                                color: widget.isPositive
+                                color: _liveIsPositive
                                     ? Colors.green.shade200
                                     : Colors.red.shade200,
                                 fontWeight: FontWeight.w600,
@@ -392,104 +490,77 @@ class _ChartScreenState extends State<ChartScreen> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
-                _statItem(
-                  'Open',
-                  '₹${widget.open.toStringAsFixed(2)}',
-                  Colors.blue,
-                ),
+                _statItem('Open',  '₹${_liveOpen.toStringAsFixed(2)}',       Colors.blue),
                 _vDivider(),
-                _statItem(
-                  'High',
-                  '₹${widget.high.toStringAsFixed(2)}',
-                  Colors.green,
-                ),
+                _statItem('High',  '₹${_liveHigh.toStringAsFixed(2)}',       Colors.green),
                 _vDivider(),
-                _statItem(
-                  'Low',
-                  '₹${widget.low.toStringAsFixed(2)}',
-                  Colors.red,
-                ),
+                _statItem('Low',   '₹${_liveLow.toStringAsFixed(2)}',        Colors.red),
                 _vDivider(),
-                _statItem(
-                  'Prev Close',
-                  '₹${widget.prevClose.toStringAsFixed(2)}',
-                  Colors.grey,
-                ),
+                _statItem('Prev',  '₹${widget.prevClose.toStringAsFixed(2)}', Colors.grey),
               ],
             ),
           ),
 
-          // ── Interval selector / Candle OHLC bar ──────────────────────
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 150),
-            child: _hoveredCandle != null
-                ? _buildCandleInfoRow(_hoveredCandle!, isDark)
-                : Padding(
-                    key: const ValueKey('interval'),
-                    padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
-                    child: Row(
-                      children: [
-                        const Text(
-                          'Interval',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey,
-                            fontWeight: FontWeight.w500,
+          // ── Interval selector ─────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+            child: Row(
+              children: [
+                const Text(
+                  'Interval',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Container(
+                  decoration: BoxDecoration(
+                    color: isDark
+                        ? Colors.grey.shade800
+                        : Colors.grey.shade200,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: _Interval.values.map((interval) {
+                      final isSelected = _selectedInterval == interval;
+                      return GestureDetector(
+                        onTap: () => _selectInterval(interval),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 7,
                           ),
-                        ),
-                        const SizedBox(width: 12),
-                        Container(
                           decoration: BoxDecoration(
-                            color: isDark
-                                ? Colors.grey.shade800
-                                : Colors.grey.shade200,
+                            color: isSelected
+                                ? Colors.blue
+                                : Colors.transparent,
                             borderRadius: BorderRadius.circular(10),
                           ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: _Interval.values.map((interval) {
-                              final isSelected = _selectedInterval == interval;
-                              return GestureDetector(
-                                onTap: () => _selectInterval(interval),
-                                child: AnimatedContainer(
-                                  duration: const Duration(milliseconds: 200),
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 16,
-                                    vertical: 7,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: isSelected
-                                        ? Colors.blue
-                                        : Colors.transparent,
-                                    borderRadius: BorderRadius.circular(10),
-                                  ),
-                                  child: Text(
-                                    interval.label,
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w600,
-                                      color: isSelected
-                                          ? Colors.white
-                                          : Colors.grey,
-                                    ),
-                                  ),
-                                ),
-                              );
-                            }).toList(),
-                          ),
-                        ),
-                        const Spacer(),
-                        if (!_isLoading && _candles.isNotEmpty)
-                          Text(
-                            '${_candles.length} candles',
-                            style: const TextStyle(
-                              fontSize: 11,
-                              color: Colors.grey,
+                          child: Text(
+                            interval.label,
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: isSelected ? Colors.white : Colors.grey,
                             ),
                           ),
-                      ],
-                    ),
+                        ),
+                      );
+                    }).toList(),
                   ),
+                ),
+                const Spacer(),
+                if (!_isLoading && _candles.isNotEmpty)
+                  Text(
+                    '${_candles.length} candles',
+                    style: const TextStyle(fontSize: 11, color: Colors.grey),
+                  ),
+              ],
+            ),
           ),
 
           // ── Chart ────────────────────────────────────────────────────
@@ -691,7 +762,8 @@ class _ChartScreenState extends State<ChartScreen> {
                   ),
                 ],
               ),
-              // Replace package's hardcoded "-XXXXK" volume label with "VOL"
+              // Covers package's hardcoded "-XXXXK" volume axis label.
+              // Shows hovered candle's volume, otherwise "VOL".
               Positioned(
                 top: volumeLabelTop,
                 right: 0,
@@ -702,8 +774,18 @@ class _ChartScreenState extends State<ChartScreen> {
                   alignment: Alignment.centerLeft,
                   padding: const EdgeInsets.only(left: 4),
                   child: Text(
-                    'VOL',
-                    style: TextStyle(fontSize: 9, color: Colors.grey.shade400),
+                    _hoveredCandle != null
+                        ? _fmtVol(_hoveredCandle!.volume)
+                        : 'VOL',
+                    style: TextStyle(
+                      fontSize: 9,
+                      fontWeight: _hoveredCandle != null
+                          ? FontWeight.w600
+                          : FontWeight.normal,
+                      color: _hoveredCandle != null
+                          ? Colors.blue.shade300
+                          : Colors.grey.shade400,
+                    ),
                   ),
                 ),
               ),
@@ -714,63 +796,4 @@ class _ChartScreenState extends State<ChartScreen> {
     );
   }
 
-  Widget _buildCandleInfoRow(Candle candle, bool isDark) {
-    final isBull = candle.close >= candle.open;
-    final priceColor = isBull ? Colors.green : Colors.red;
-    final h = candle.date.hour.toString().padLeft(2, '0');
-    final m = candle.date.minute.toString().padLeft(2, '0');
-
-    return Container(
-      key: const ValueKey('ohlc'),
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
-      child: Row(
-        children: [
-          Text(
-            '$h:$m',
-            style: TextStyle(
-              fontSize: 11,
-              color: Colors.grey.shade500,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(width: 10),
-          _ohlcChip('O', candle.open, Colors.blue),
-          _ohlcChip('H', candle.high, Colors.green),
-          _ohlcChip('L', candle.low, Colors.red),
-          _ohlcChip('C', candle.close, priceColor),
-          const Spacer(),
-          Icon(Icons.bar_chart, size: 12, color: Colors.grey.shade400),
-          const SizedBox(width: 3),
-          Text(
-            _fmtVol(candle.volume),
-            style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _ohlcChip(String label, double value, Color color) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 10),
-      child: RichText(
-        text: TextSpan(
-          children: [
-            TextSpan(
-              text: '$label ',
-              style: const TextStyle(fontSize: 10, color: Colors.grey),
-            ),
-            TextSpan(
-              text: value.toStringAsFixed(2),
-              style: TextStyle(
-                fontSize: 11,
-                color: color,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
