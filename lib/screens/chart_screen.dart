@@ -131,12 +131,14 @@ class _ChartScreenState extends State<ChartScreen> {
   void _updateCurrentCandle(double ltp) {
     if (_candles.isEmpty) return;
 
-    final ist = DateTime.now().toUtc().add(const Duration(hours: 5, minutes: 30));
+    // Use local time — candle dates from API are also local time
+    // (DateTime.fromMillisecondsSinceEpoch returns local by default)
+    final now = DateTime.now();
     final intervalMins = _selectedInterval == _Interval.m5 ? 5 : 15;
     final latest = _candles[0];
     final candleEnd = latest.date.add(Duration(minutes: intervalMins));
 
-    if (ist.isBefore(candleEnd)) {
+    if (now.isBefore(candleEnd)) {
       // Still inside the current candle — update H/L/C
       setState(() {
         _candles[0] = Candle(
@@ -150,7 +152,7 @@ class _ChartScreenState extends State<ChartScreen> {
       });
     } else {
       // New interval started — add a fresh forming candle
-      final newDate = _alignToInterval(ist, intervalMins);
+      final newDate = _alignToInterval(now, intervalMins);
       setState(() {
         _candles.insert(
           0,
