@@ -9,6 +9,8 @@ import '../services/scrip_service.dart';
 import '../services/storage_service.dart';
 import 'chart_screen.dart';
 import 'holdings_screen.dart';
+import 'log_viewer_screen.dart';
+import 'strategy_list_screen.dart';
 import 'token_entry_screen.dart';
 import 'watchlist_manager_screen.dart';
 
@@ -351,6 +353,19 @@ class _LtpScreenState extends State<LtpScreen> {
     } catch (_) {
       if (mounted) setState(() => _fundsLoading = false);
     }
+  }
+
+  void _openStrategies() {
+    Navigator.pop(context); // close drawer
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => StrategyListScreen(
+          clientId: widget.clientId,
+          accessToken: widget.accessToken,
+        ),
+      ),
+    );
   }
 
   void _openHoldings() {
@@ -904,6 +919,36 @@ class _LtpScreenState extends State<LtpScreen> {
                   label: 'Manage Watchlists',
                   iconColor: const Color(0xFF2E7D32),
                   onTap: _openWatchlistManager,
+                ),
+
+                const SizedBox(height: 8),
+
+                // Strategies section
+                _sectionLabel('STRATEGIES'),
+                _drawerTile(
+                  icon: Icons.auto_graph,
+                  label: 'Strategies',
+                  iconColor: Colors.deepPurple,
+                  onTap: _openStrategies,
+                ),
+
+                const SizedBox(height: 8),
+
+                // Developer section
+                _sectionLabel('DEVELOPER'),
+                _drawerTile(
+                  icon: Icons.article_outlined,
+                  label: 'View Logs',
+                  iconColor: Colors.blueGrey,
+                  onTap: () {
+                    Navigator.pop(context); // close drawer
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const LogViewerScreen(),
+                      ),
+                    );
+                  },
                 ),
 
                 const SizedBox(height: 8),

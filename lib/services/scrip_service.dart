@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../data/nifty500_stocks.dart';
 
 class ScripInfo {
   final String symbol;
@@ -29,6 +30,11 @@ class ScripInfo {
 }
 
 class ScripService {
+  // Singleton instance — scrips are loaded once and shared across the app.
+  static final ScripService _instance = ScripService._internal();
+  factory ScripService() => _instance;
+  ScripService._internal();
+
   // Authenticated endpoint — returns NSE_EQ only (much smaller than full CSV)
   static const _nseEqUrl = 'https://api.dhan.co/v2/instrument/NSE_EQ';
   // Public fallback — full master with all segments
@@ -80,6 +86,25 @@ class ScripService {
       final cached = await _loadFromFile();
       if (cached != null) _scrips = cached;
     }
+  }
+
+  // ── Nifty 500 stock universe (matches C# GetNseEquities) ────────────
+  /// Returns security IDs of all loaded NSE EQ scrips that are in the
+  /// Nifty 500 list. Mirrors C#: InstrumentService.GetNseEquities(limit).
+  List<int> getNifty500SecurityIds({int limit = 500}) {
+    return _scrips
+        .where((s) => Nifty500Stocks.isNifty500(s.symbol))
+        .take(limit)
+        .map((s) => s.securityId)
+        .toList();
+  }
+
+  /// Returns ScripInfo list for Nifty 500 stocks.
+  List<ScripInfo> getNifty500Scrips({int limit = 500}) {
+    return _scrips
+        .where((s) => Nifty500Stocks.isNifty500(s.symbol))
+        .take(limit)
+        .toList();
   }
 
   // ── Search from loaded scrips ────────────────────────────────────────

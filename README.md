@@ -1,6 +1,6 @@
-# Dhan LTP Viewer
+# Dhan Trader
 
-A Flutter mobile app for viewing **live stock prices** from your [Dhan](https://dhan.co) account. Built for Indian equity markets (NSE).
+A Flutter mobile app for **live stock prices**, **candlestick charts**, and **automated trading strategies** using the [Dhan](https://dhan.co) API. Built for Indian equity markets (NSE).
 
 ---
 
@@ -10,12 +10,23 @@ A Flutter mobile app for viewing **live stock prices** from your [Dhan](https://
 - Real-time LTP via Dhan's **WebSocket binary feed** — true tick-by-tick data
 - Previous day's close sourced from **Code 6 packets** (sent on subscription)
 - Shows **% change** from previous day's closing price
-- Live connection status dot: **● LIVE** (market open) / **● Connected** (market closed) / **● Connecting** / **● Reconnecting**
+- Live connection status dot: **LIVE** (market open) / **Connected** (market closed) / **Connecting** / **Reconnecting**
 - Auto-reconnects on disconnect with 5-second backoff
+
+### Candlestick Chart
+- Tap any stock → detail sheet → **View Chart** button
+- **5 min** and **15 min** intraday intervals
+- **Live candles** — current candle updates tick-by-tick via WebSocket (H/L/C update in real time)
+- New candle automatically inserted when interval boundary is crossed
+- Scroll left to auto-load previous trading days (handles weekends + holidays)
+- **Touch any candle** to see OHLC + volume inside the chart
+- Volume shown in the VOL overlay
+- **Jump to latest** toolbar button to snap back to today's candles
+- Filtered to **market hours only** (9:15 AM – 3:30 PM IST)
 
 ### Holdings / Portfolio
 - View your **long-term holdings** with live LTP refresh
-- Shows **unrealised P&L** (₹ and %) per stock + overall portfolio
+- Shows **unrealised P&L** (INR and %) per stock + overall portfolio
 - Portfolio summary: Current Value, Total Invested, Overall P&L
 - Large number formatting: K / L / Cr
 
@@ -31,7 +42,7 @@ A Flutter mobile app for viewing **live stock prices** from your [Dhan](https://
 - Double-tap to **rename** a watchlist
 - Swipe to **delete** a watchlist
 
-### Dynamic Stock Search
+### Stock Search
 - Downloads Dhan's **NSE_EQ instrument list** via authenticated API on first launch
 - Cached locally — re-downloads **once per day** automatically
 - Falls back to full public scrip master CSV if auth endpoint fails
@@ -44,34 +55,133 @@ A Flutter mobile app for viewing **live stock prices** from your [Dhan](https://
 - Based on IST time: 9:15 AM – 3:30 PM, Monday–Friday
 
 ### Sort Stocks
-- Best performers first (▲ % Change)
-- Worst performers first (▼ % Change)
-- Name A → Z
+- Best performers first (% Change descending)
+- Worst performers first (% Change ascending)
+- Name A to Z
 
-### Candlestick Chart
-- Tap any stock → detail sheet → **View Chart** button
-- **5 min** and **15 min** intraday intervals
-- **Live candles** — current candle updates tick-by-tick via WebSocket (H/L/C update in real time)
-- New candle automatically inserted when interval boundary is crossed
-- Scroll left to auto-load previous trading days (handles weekends + holidays)
-- **Touch any candle** to see OHLC + volume inside the chart
-- Volume shown in the VOL overlay — displays actual value (blue) when hovering a candle
-- **Jump to latest** toolbar button to snap back to today's candles
-- Filtered to **market hours only** (9:15 AM – 3:30 PM IST)
+### Dark Mode
+- Toggle from side drawer, persists across sessions
 
-### UI & UX
-- **Dark Mode** toggle (saved across sessions)
-- **Pull to refresh** manually
-- Modern side drawer with gradient header
-- Stock detail bottom sheet on tap
-- Branded splash screen (blue theme)
-- **Gainers / Losers summary** in the bottom bar: `▲ 12  ▼ 8  — 2` alongside the live status dot
-- **Search bar** below the app bar for quick stock discovery and adding
+---
 
-### Credentials
-- Enter Dhan **Client ID** and **Access Token** once
-- Saved securely on device using `shared_preferences`
-- Edit or clear credentials from the drawer anytime
+## Strategy Engine (Dominance + Breakout)
+
+Automated trading strategy ported 1:1 from the C# Dhan Live Trader project. Scans **Nifty 500 stocks** for dominance candles and enters on breakout.
+
+### How It Works
+
+```
+Pre-Market (before 9:15)
+  → prepare(): Fetch 10 days of 5-min candles for Nifty 500 stocks
+  → Compute: avgCandleSize, avgVolume, prevClose per stock
+
+Screening Window (9:30 - 10:00)
+  → scan() every 5 min: Check each candle against 8 dominance rules
+  → First match per stock wins → creates a signal (entry = high, SL = low)
+
+Breakout Monitoring (after signal)
+  → WebSocket LTP feed: if LTP > dominance high → BREAKOUT
+  → Position sizing: quantity = floor(fixedSL / riskPerShare)
+  → Target: entryPrice + (fixedTarget / quantity)
+
+Exit
+  → LTP <= stopLoss → close at SL
+  → LTP >= target → close at target
+  → End of day → auto-close
+```
+
+### 8 Dominance Candle Rules (exact C# match)
+
+| # | Rule | Default |
+|---|------|---------|
+| 1 | Must be bullish (close > open) | — |
+| 2 | Body % of range in [min, max] | 70% – 85% |
+| 3 | Both wicks >= min wick % | >= 5% |
+| 4 | Candle size between min/max x average | 1.0x – 2.5x |
+| 5 | Volume >= multiplier x average volume | >= 2.0x |
+| 6 | All candles from 9:15 to dominance candle >= min absolute volume | >= 5000 |
+| 7 | Actual movement <= max x expected movement | <= 2.0x |
+| 8 | Gap filter: gap up <= max%, gap down <= max% | up <= 2.5%, down <= 1.0% |
+
+### Position Sizing (exact C# match)
+
+```
+riskPerShare = entryPrice - stopLoss
+quantity     = floor(fixedStopLoss / riskPerShare)
+targetPrice  = entryPrice + (fixedTarget / quantity)
+```
+Default: Risk INR 500, Target INR 2000 per trade, max 2 trades/day.
+
+### Strategy Config Screen
+- All parameters editable via sliders and +/- buttons
+- Grouped sections: Screening Window, Dominance Rules, Position Sizing, Pre-Market Data
+- **Paper / Live toggle** with confirmation dialog for Live mode
+- **Enabled / Paused toggle** — pause without deleting
+- **Stock Universe** — auto-loaded from Nifty 500 (scrollable list of all stocks)
+
+### Strategy List Screen
+- **Default strategy auto-created** on first launch with Nifty 500 stocks
+- **START / STOP button** directly on each strategy card
+- Running state indicator with "RUNNING" badge
+- Paper/Live badge, stock count, SL amount badges
+- 3-dot menu: View Dashboard, Edit Config, Delete
+- "+" button in app bar to create additional strategies
+
+### Strategy Dashboard
+- Gradient header with strategy name and START/STOP button
+- Config summary chips: Stocks, Risk, Target, Max Trades
+- Paper/Live mode badge in app bar
+- **Phase Stepper**: Visual progress indicator — Load → Pre-Mkt → Screen → Monitor → Done (green checkmarks for completed, blue for active)
+- **Candidates Section**: Horizontal scrollable cards for dominance signals showing symbol, entry price, SL, time, and status (Watching/Traded)
+- **Auto-scroll Activity Log**: Real-time activity feed that auto-scrolls to newest entry
+- **History Button**: Navigate to daily run history from app bar
+
+### Strategy Engine
+- Full engine running inside background isolate: `prepare()` → progressive screening → dominance scan → breakout monitoring → exit
+- **Progressive Volume Elimination**: Filters out low-volume / no-data / API-error stocks at each 5-min interval with detailed breakdown logging (e.g., `Eliminated 254 — LowVolume: 200, NoData: 50, ApiError: 4`)
+- **Dominance Rejection Logging**: Tracks which of the 8 rules rejected each candle with `onReject` callback — produces a rejection summary (e.g., `R5-Volume: 320, R2-Body%: 45`)
+- **Daily Run Summary**: Auto-saves run results (stocks scanned, candidates found, trades, P&L, key events) to SharedPreferences for history
+
+### Daily Run History
+- View past strategy runs as cards (date, mode, stats, P&L)
+- Tap card → bottom sheet with full details + color-coded activity log
+- Delete individual days or clear all history
+- Max 30 days retained automatically
+
+### Background Service (Foreground Service)
+- Strategy runs even when **phone is locked or app is minimized**
+- Uses Android foreground service via `flutter_background_service`
+- Small persistent notification: "Strategy Name (Paper/Live) — Scanning stocks..."
+- Requests notification permission on Android 13+ before starting
+- Auto-stops when strategy completes or user taps STOP
+- Detects running state when app is reopened
+
+### Plugin Architecture
+- `BaseStrategy` abstract class with lifecycle: `prepare()` → `scan()` → `checkBreakout()` → `checkExit()`
+- `StrategyRegistry` for registering and creating strategy types
+- `StrategyParamDef` drives auto-generated config UI from parameter definitions
+- Easily extensible — add new strategies by implementing `BaseStrategy` and registering in the registry
+
+### Nifty 500 Stock Universe
+- Hard-coded symbol list in `lib/data/nifty500_stocks.dart` (mirrors C# `Nifty500Stocks.cs`)
+- `ScripService.getNifty500SecurityIds()` filters loaded NSE EQ instruments by Nifty 500 membership
+- Matches C# `InstrumentService.GetNseEquities()` behavior exactly
+
+---
+
+## App Logging
+
+File-based logger for debugging on device.
+
+- Logs written to `app_log.txt` on device storage
+- Levels: INFO, WARN, ERROR, STRAT (strategy), TRADE
+- Includes timestamps, tags, and full stack traces on errors
+- **Drawer → View Logs** opens the log viewer screen
+- Filter by level (quick chips) or free text search
+- **Copy** button to clipboard (copies filtered logs)
+- **Share/Export** button — writes logs to a timestamped `.txt` file and opens Android share sheet (send via WhatsApp, email, save to files, etc.)
+- Auto-trims log file at 500KB to prevent storage bloat
+- Catches uncaught Flutter errors via `FlutterError.onError`
 
 ---
 
@@ -79,26 +189,47 @@ A Flutter mobile app for viewing **live stock prices** from your [Dhan](https://
 
 ```
 lib/
-├── main.dart                          # App entry, theme management
+├── main.dart                              # App entry, theme, error handling, service init
+│
+├── data/
+│   └── nifty500_stocks.dart               # Nifty 500 symbol set (mirrors C# Nifty500Stocks.cs)
 │
 ├── models/
-│   ├── watchlist_model.dart           # WatchlistModel data class
-│   └── holding_model.dart             # HoldingModel with P&L computed fields
+│   ├── watchlist_model.dart               # WatchlistModel data class
+│   ├── holding_model.dart                 # HoldingModel with P&L computed fields
+│   ├── candle_stats_model.dart            # Pre-computed historical metrics per stock
+│   ├── strategy_config_model.dart         # Strategy config: type, params, stocks, paper/live, enabled
+│   ├── strategy_signal_model.dart         # Dominance candle signal with metrics
+│   ├── strategy_trade_model.dart          # Trade with entry/exit, SL/target, P&L computed fields
+│   └── daily_run_summary_model.dart       # Daily run history: stats, events, P&L
 │
 ├── screens/
-│   ├── token_entry_screen.dart        # Credential input screen
-│   ├── ltp_screen.dart                # Main live prices screen (WebSocket)
-│   ├── chart_screen.dart              # Candlestick chart with OHLC info bar
-│   ├── holdings_screen.dart           # Portfolio screen with live P&L
-│   ├── watchlist_manager_screen.dart  # Create / rename / delete watchlists
-│   └── watchlist_screen.dart          # Add / remove stocks in a watchlist
+│   ├── token_entry_screen.dart            # Credential input screen
+│   ├── ltp_screen.dart                    # Main live prices screen (WebSocket) + side drawer
+│   ├── chart_screen.dart                  # Candlestick chart with live candle updates
+│   ├── holdings_screen.dart               # Portfolio screen with live P&L
+│   ├── watchlist_manager_screen.dart      # Create / rename / delete watchlists
+│   ├── watchlist_screen.dart              # Add / remove stocks in a watchlist
+│   ├── strategy_list_screen.dart          # Strategy cards with START/STOP buttons
+│   ├── strategy_config_screen.dart        # Auto-generated param editor from StrategyParamDef
+│   ├── strategy_dashboard_screen.dart     # Strategy run dashboard (phase stepper, candidates, activity)
+│   ├── strategy_history_screen.dart       # Daily run history with details and delete
+│   └── log_viewer_screen.dart             # On-device log viewer with filter, copy, and share/export
 │
-└── services/
-    ├── dhan_service.dart              # Dhan REST API calls (OHLC, charts, holdings, funds)
-    ├── dhan_feed_service.dart         # Dhan WebSocket binary feed (live prices)
-    ├── rate_limiter.dart              # Centralized API rate limiter (singleton)
-    ├── scrip_service.dart             # Scrip master download, parse, cache
-    └── storage_service.dart           # SharedPreferences: credentials, watchlists, theme
+├── services/
+│   ├── dhan_service.dart                  # Dhan REST API calls (OHLC, charts, holdings, funds)
+│   ├── dhan_feed_service.dart             # Dhan WebSocket binary feed (live prices)
+│   ├── rate_limiter.dart                  # Centralized API rate limiter (singleton)
+│   ├── scrip_service.dart                 # Scrip master download, parse, cache, Nifty 500 filter (singleton)
+│   ├── storage_service.dart               # SharedPreferences: credentials, watchlists, theme, configs, trades
+│   ├── app_logger.dart                    # File-based logger with memory buffer
+│   ├── strategy_background_service.dart   # Android foreground service for background strategy execution
+│   └── strategy_engine.dart               # Strategy execution engine (runs in background isolate)
+│
+└── strategies/
+    ├── base_strategy.dart                 # Abstract strategy interface + StrategyParamDef
+    ├── strategy_registry.dart             # Factory registry for strategy types
+    └── dominance_breakout_strategy.dart   # Dominance candle + breakout strategy (exact C# port)
 ```
 
 ---
@@ -110,10 +241,13 @@ lib/
 | `http` | REST API calls to Dhan |
 | `web_socket_channel` | WebSocket binary live feed |
 | `shared_preferences` | Local key-value storage |
-| `path_provider` | File system access for scrip cache |
-| `uuid` | Unique IDs for each watchlist |
+| `path_provider` | File system access for scrip/log cache |
+| `uuid` | Unique IDs for watchlists, strategies, trades |
 | `candlesticks` | Candlestick chart widget |
 | `flutter_native_splash` | Branded splash screen |
+| `flutter_background_service` | Android foreground service for background execution |
+| `flutter_local_notifications` | Notification channel for foreground service |
+| `share_plus` | Native share sheet for log export |
 
 ---
 
@@ -136,7 +270,7 @@ lib/
 
 ### Prerequisites
 - Flutter SDK (3.x+)
-- Android emulator or physical device
+- Android device (API 26+)
 - Active [Dhan](https://dhan.co) account with API access
 
 ### Run the App
@@ -147,11 +281,19 @@ flutter pub get
 flutter run
 ```
 
+### Build Release APK
+
+```bash
+flutter build apk --release
+# Output: build/app/outputs/flutter-apk/app-release.apk
+```
+
 ### First Launch
 1. Enter your **Dhan Client ID** and **Access Token**
 2. App downloads the NSE_EQ instrument list (authenticated, small file)
 3. Default watchlist loads with 5 Nifty stocks
 4. WebSocket connects — live prices start streaming instantly
+5. Default "Dominance + Breakout" strategy auto-created with Nifty 500 stocks
 
 ---
 
@@ -161,20 +303,22 @@ flutter run
 ```
 App opens
   ↓
+Init logger + background service
+  ↓
 Load saved credentials + watchlists + theme
   ↓
-Download NSE_EQ instrument list via /v2/instrument/NSE_EQ (or fallback CSV)
+Download NSE_EQ instrument list (or load from cache)
   ↓
-Fetch yesterday's close for each watchlist stock (historical API)
+Fetch yesterday's close for each watchlist stock
   ↓
 Initial REST OHLC call (fast first paint)
   ↓
-Connect WebSocket → subscribe → Code 6 (prevClose) + Code 4 (OHLC) stream in
+Connect WebSocket → subscribe → live prices stream in
 ```
 
 ### WebSocket Binary Protocol
 ```
-Connection: wss://api-feed.dhan.co?version=2&token=…&clientId=…&authType=2
+Connection: wss://api-feed.dhan.co?version=2&token=...&clientId=...&authType=2
 
 Subscribe (JSON):
   { "RequestCode": 15, "InstrumentCount": N,
@@ -190,38 +334,35 @@ Binary packets (little-endian, 8-byte header):
   Code 6 – PrevClose: header + prevClose(f32) + OI(i32)       = 16 bytes
 ```
 
-### % Change Calculation
+### Strategy Flow
 ```
-% Change = (LTP - Previous Day Close) / Previous Day Close × 100
-```
-Previous day close sourced from WebSocket Code 6 packets (sent on subscription)
-and Code 4's `close` field as fallback. Also pre-loaded via historical REST API
-at startup so pull-to-refresh always shows correct values.
-
-### Scrip Master Caching
-```
-First launch of the day  →  GET /v2/instrument/NSE_EQ (auth, NSE_EQ only)
-                            Fallback: download full CSV from Dhan CDN
-                         →  Filter: EQUITY + EQ series only
-                         →  Save as JSON to device storage
-Same day relaunch        →  Load from local JSON cache (instant)
-Next day                 →  Re-download fresh copy
+User taps START on strategy card
+  ↓
+Android foreground service starts (survives lock screen / background)
+  ↓
+prepare(): Fetch 10 days of 5-min candles for Nifty 500 (compute averages)
+  ↓
+scan() at 9:30, 9:35, 9:40, ..., 10:00: Check every candle against 8 rules
+  ↓
+Signal found → monitor LTP via WebSocket
+  ↓
+LTP > dominance high → BREAKOUT → open trade (paper or live)
+  ↓
+LTP hits SL or target → close trade → log result
+  ↓
+Screening window ends → auto-stop → show results
 ```
 
 ---
 
 ## Dhan API Rate Limits
 
-> Source: [dhanhq.co/docs/v2](https://dhanhq.co/docs/v2/)
-
-### Official Limits by Endpoint Category
-
-| Category | Per Second | Per Minute | Per Hour | Per Day |
-|---|---|---|---|---|
-| **Quote APIs** (marketfeed/ltp, ohlc, quotes) | **1 req/sec** | Unlimited | Unlimited | Unlimited |
-| **Data APIs** (charts/intraday, charts/historical) | **5 req/sec** | — | — | 100,000/day |
-| **Order APIs** | 10 req/sec | 250 | 1,000 | 7,000 |
-| **Non-Trading APIs** | 20 req/sec | Unlimited | Unlimited | Unlimited |
+| Category | Per Second | Per Day |
+|---|---|---|
+| **Quote APIs** (marketfeed/ltp, ohlc, quotes) | 1 req/sec | Unlimited |
+| **Data APIs** (charts/intraday, charts/historical) | 5 req/sec | 100,000/day |
+| **Order APIs** | 10 req/sec | 7,000/day |
+| **Non-Trading APIs** | 20 req/sec | Unlimited |
 
 ### WebSocket Limits
 
@@ -230,128 +371,103 @@ Next day                 →  Re-download fresh copy
 | Max simultaneous connections | 5 |
 | Max instruments per connection | 5,000 |
 | Max instruments per subscription message | 100 |
-| Server ping interval | Every 10 seconds |
-| Connection timeout (no pong) | 40 seconds |
 
 ### How This App Handles Rate Limits
-
-| Action | Method | Frequency |
-|---|---|---|
-| Live price updates | WebSocket push | Real-time (per trade) |
-| Initial OHLC display | REST (`/v2/marketfeed/ohlc`) | Once at startup |
-| Prev close loading | REST (`/v2/charts/historical`) | Once per watchlist load |
-| Chart data | REST (`/v2/charts/intraday`) | On demand |
-| Funds balance | REST (`/v2/fundlimit`) | On drawer open |
-| Holdings | REST (`/v2/holdings`) | On screen open |
-
-### Centralized Rate Limiter (`lib/services/rate_limiter.dart`)
-
-The app uses a **centralized watchman** — a `RateLimiter` singleton that every REST API call must pass through. This prevents 429 errors entirely.
-
-**Usage in code:**
-```dart
-await RateLimiter.instance.acquire(ApiCategory.quote); // for marketfeed/*
-await RateLimiter.instance.acquire(ApiCategory.data);  // for charts/*
-```
-
----
-
-## Notes
-
-- All credentials are stored **locally on your device only**
-- WebSocket connection uses the same access token as REST APIs
-- Dark mode and watchlist configuration persist across app restarts
+- Live prices: WebSocket push (zero REST usage)
+- Centralized `RateLimiter` singleton for all REST calls
+- Strategy prepare(): Sequential with rate limiting for 500 stocks
 
 ---
 
 ## Issues Faced During Development
 
 ### 1. Wrong Auth Header
-**Problem:** Initial API calls returned 401 Unauthorized.
-**Cause:** Used `Authorization: Bearer <token>` — but Dhan expects a custom header.
-**Fix:** Changed to `access-token: <token>` and `client-id: <clientId>` as separate headers.
+**Problem:** 401 Unauthorized. **Fix:** Changed from `Authorization: Bearer` to `access-token` + `client-id` headers.
 
 ### 2. Missing Internet Permission
-**Problem:** App failed silently with "Failed to fetch prices" on Android.
-**Cause:** `AndroidManifest.xml` did not have the internet permission declared.
-**Fix:** Added `<uses-permission android:name="android.permission.INTERNET"/>` before the `<application>` tag.
+**Problem:** Silent failure on Android. **Fix:** Added `INTERNET` permission in AndroidManifest.xml.
 
-### 3. Quotes Endpoint Returning 404
-**Problem:** `POST /v2/marketfeed/quotes` returned `404 page not found`.
-**Cause:** This endpoint is not available on all Dhan API plans.
-**Fix:** Switched to `POST /v2/marketfeed/ohlc` which provides LTP + Open/High/Low/Close.
+### 3. Quotes Endpoint 404
+**Problem:** `/v2/marketfeed/quotes` returned 404. **Fix:** Switched to `/v2/marketfeed/ohlc`.
 
 ### 4. Rate Limiting (HTTP 429)
-**Problem:** App started getting rate limit errors from Dhan.
-**Cause:** Were making 2 parallel API calls (LTP + OHLC) every 3 seconds, exceeding the 1 req/sec limit.
-**Fix:** Consolidated to a single OHLC call and added centralized rate limiter.
+**Problem:** Too many parallel API calls. **Fix:** Centralized rate limiter with per-category throttling.
 
-### 5. % Change Showing 0% or Wrong Value
-**Problem:** All stocks showed 0.00% change.
-**Cause:** `ohlc.close` equals `ltp` when the market is closed — both reflect the last traded price.
-**Fix:** Fetch yesterday's closing price via the historical API at startup. WebSocket Code 6 packets also provide prevClose on subscription.
+### 5. % Change Showing 0%
+**Problem:** `ohlc.close` equals LTP when market is closed. **Fix:** Fetch previous day's close via historical API + WebSocket Code 6.
 
-### 6. DH-905 Error from Historical API
-**Problem:** Historical API returned error code DH-905 when requesting a single day's data.
-**Cause:** No trading data exists for the specific date requested (e.g. weekend or holiday).
-**Fix:** Fetch a 7-day range and use the last available close value.
+### 6. DH-905 Error
+**Problem:** Historical API error for weekends/holidays. **Fix:** Fetch 7-day range, use last available close.
 
-### 7. DH-1111 Error from Holdings API
-**Problem:** `GET /v2/holdings` returned HTTP 500 with `errorCode: "DH-1111"`.
-**Cause:** Dhan returns HTTP 500 (not 404) when the account has no holdings — poor API design.
-**Fix:** Detect the specific `DH-1111` error code and treat it as an empty holdings list.
+### 7. DH-1111 Error
+**Problem:** Holdings API returns HTTP 500 for empty portfolios. **Fix:** Detect `DH-1111` and treat as empty list.
 
-### 8. % Change Resets to 0% After Watchlist Switch
-**Problem:** Switching watchlists then pulling to refresh showed 0% change for all stocks.
-**Cause:** `loadPrevCloses()` only ran at startup for the initial watchlist. New watchlist stocks had no cached prevClose, so the REST pull-to-refresh built quotes with prevClose=0.
-**Fix:** Fire `loadPrevCloses()` in the background after every watchlist switch so the REST fallback always has correct prevClose values. WebSocket Code 6 handles the immediate live display.
+### 8. % Change Resets on Watchlist Switch
+**Problem:** New watchlist stocks had no cached prevClose. **Fix:** Fire `loadPrevCloses()` after every watchlist switch.
 
-### 9. MissingPluginException for shared_preferences
-**Problem:** App crashed with `MissingPluginException` after adding `shared_preferences`.
-**Cause:** Native plugins require a full rebuild — hot reload / hot restart is not enough.
-**Fix:** Stop the app and run `flutter run` from scratch to trigger a full rebuild.
+### 9. LIVE + Closed Labels Contradicting
+**Problem:** Bottom bar showed LIVE while app bar showed Closed. **Fix:** Show LIVE only when market is open AND feed is connected.
 
-### 10. Windows Developer Mode Required
-**Problem:** `flutter run` failed with a symlink permission error on Windows.
-**Cause:** Flutter creates symlinks for plugin packages, which require Developer Mode on Windows.
-**Fix:** Enable Developer Mode via `Settings → Privacy & Security → For Developers`.
+### 10. Chart Live Candle Creating Separate Candles
+**Problem:** Every WebSocket tick created a new tiny candle instead of updating existing. **Cause:** `DateTime.now().toUtc().add(5:30)` creates UTC-marked time with IST value — 5.5 hour mismatch with local-time candle dates. **Fix:** Use `DateTime.now()` (local time) to match API candle timestamps.
 
-### 11. Private Field Access Across Files
-**Problem:** `ltp_screen.dart` could not access `_isDark` from `_MyAppState`.
-**Cause:** Dart's `_` prefix makes fields private to the file they are declared in, not just the class.
-**Fix:** Added a public getter `bool get isDark => _isDark;` in `_MyAppState`.
+### 11. Strategy scan() Only Checking Last Candle
+**Problem:** Flutter scan only checked `candles.last` instead of iterating all candles. C# processes every candle via `ProcessCandle` with `IsActiveAt` time check. **Fix:** Iterate all candles in screening window, first match per stock wins.
 
-### 12. LIVE + Closed Labels Contradicting Each Other
-**Problem:** Bottom bar showed `● LIVE` (green) while app bar showed `● Closed` (red) at the same time.
-**Cause:** These are two different states — WebSocket connection status vs. market trading hours. Both were correct but looked contradictory.
-**Fix:** Show `● LIVE` only when market is open AND feed is connected. Show `● Connected` when feed is active but market is closed.
+### 12. Background Service Crash on START
+**Problem:** App crashed when tapping START. **Cause:** (a) `_onStart` was private — isolate couldn't find it. (b) Android 13+ requires runtime notification permission before foreground service. **Fix:** Made `onStart` public, added `requestNotificationsPermission()` call before starting service.
 
-### 13. Duplicate OHLC Display in Chart
-**Problem:** OHLC values appeared both inside the chart (package's built-in info bar on long-press) and in a separate row outside the chart where the interval selector normally sits.
-**Cause:** The external row showed stale data and had no clear purpose once the package's built-in display was working.
-**Fix:** Removed the external OHLC row entirely. OHLC is now shown only inside the chart on long-press, which is the correct location.
+### 13. ScripService Not Singleton
+**Problem:** `ScripService()` created new empty instances — strategy got 0 stocks. **Fix:** Made ScripService a singleton with `factory` constructor.
+
+### 14. Strategy securityIds Always Empty
+**Problem:** New strategy defaulted to `securityIds = []` — 0 stocks to scan. **Fix:** Auto-populate from Nifty 500 list on strategy creation.
 
 ---
 
-## Future Considerations
+## Build Phases
 
-### F&O (Futures & Options) Support
-Dhan API supports `NSE_FNO` segment for index/stock futures and call/put options. Adding F&O would require: downloading the F&O scrip master (50,000+ instruments), an option chain UI (strike × expiry × CE/PE), and updating WebSocket subscriptions to use `NSE_FNO` exchange segment.
+### Phase 1 (Complete)
+- Strategy models (config, signal, trade)
+- Dominance + Breakout strategy (exact C# port, all 8 rules)
+- Plugin architecture (BaseStrategy, StrategyRegistry, StrategyParamDef)
+- Config screen with auto-generated UI
+- Strategy list with START/STOP buttons
+- Nifty 500 stock universe
+- Background service infrastructure
+- App logging system
 
-### Token Expiry
-Dhan access tokens expire daily. The app detects 401/403 responses and shows an "Update Token" prompt, but cannot auto-refresh. Consider integrating Dhan's OAuth flow if it becomes available.
+### Phase 2 (Complete)
+- Strategy engine inside background service (isolate)
+- Historical data fetching (prepare phase) with progress tracking
+- Progressive volume screening at 5-min intervals with elimination breakdown
+- Dominance candle scanning with rejection logging (8 rules)
+- Phase-aware dashboard with stepper, candidates, auto-scroll activity
 
-### Market Holidays
-The **Market Open** badge is based purely on clock time (9:15 AM – 3:30 PM, Mon–Fri). It does not account for Indian stock market holidays.
+### Phase 3 (Complete)
+- Trade execution (paper mode: simulated fills)
+- Breakout monitoring via REST LTP polling
+- Results display on dashboard (signals, trades, P&L)
+- Daily run history with persistence (max 30 days)
+- Log export/share via Android share sheet
+- Auto-stop at end of screening window
 
-### Credential Security
-Credentials are stored using `shared_preferences` (plain-text on Android). For production use, consider `flutter_secure_storage` which uses Android Keystore / iOS Keychain.
+### Phase 4 (Next)
+- Live trading via Dhan Order API
+- Order placement, confirmation, and monitoring
+- End-of-day auto-square-off
 
-### No Background Refresh
-Prices only update while the app is in the foreground. No background service or price alerts. The WebSocket disconnects when the app is backgrounded and reconnects on foreground.
+### Phase 5
+- Auto-schedule (start strategy at fixed time daily)
+- Trade history and analytics
+- Multiple concurrent strategies
 
-### Historical API on Weekends
-When the app is opened on a weekend, the "previous close" is technically Friday's close. Consider labeling the % change as "vs Fri Close" on weekends.
+---
 
-### No State Management Library
-The app uses `setState` and `MyApp.of(context)` for state sharing. For a larger app, adopting Riverpod or Bloc would improve maintainability.
+## Notes
+
+- All credentials stored **locally on device only**
+- ScripService is a singleton — loaded once, shared across app
+- Strategy configs and trades persisted via SharedPreferences
+- Background service uses Android foreground service (requires notification)
+- Dark mode and all settings persist across app restarts
