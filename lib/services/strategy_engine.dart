@@ -12,6 +12,7 @@ import '../models/strategy_config_model.dart';
 import '../models/strategy_signal_model.dart';
 import '../models/strategy_trade_model.dart';
 import '../services/app_logger.dart';
+import '../services/rate_limiter.dart';
 import '../services/scrip_service.dart';
 import '../services/storage_service.dart';
 import '../strategies/dominance_breakout_strategy.dart';
@@ -54,9 +55,7 @@ class StrategyEngine {
   // Nifty 500 security IDs loaded from scrip master
   List<int> _securityIds = [];
 
-  // API rate limiting (5 req/sec for data API)
-  DateTime _lastApiCall = DateTime.fromMillisecondsSinceEpoch(0);
-  static const _minApiDelayMs = 220; // ~4.5 req/sec to be safe
+  // API rate limiting — uses global RateLimiter.instance
 
   StrategyEngine({
     required this.clientId,
@@ -149,13 +148,14 @@ class StrategyEngine {
 
     // Load scrip master (from cache or API)
     await _scripService.loadScrips(clientId: clientId, accessToken: accessToken);
+    await _scripService.loadIndexConstituents();
     _log('Engine', 'Scrip master loaded: ${_scripService.isLoaded ? "yes" : "FAILED"}');
 
     // Get Nifty 500 security IDs
     if (config.securityIds.isNotEmpty) {
       _securityIds = List.from(config.securityIds);
     } else {
-      _securityIds = _scripService.getNifty500SecurityIds(limit: 500);
+      _securityIds = _scripService.getSecurityIdsForUniverse('Nifty 500');
     }
 
     _log('Engine', 'Stock universe: ${_securityIds.length} stocks');
@@ -409,10 +409,13 @@ class StrategyEngine {
       debugLog: (msg) => _log('Scan', msg),
     );
 
+    final maxTrades = (config.params['maxTradesPerDay'] as num?)?.toInt() ?? 2;
+
     for (final signal in signals) {
-      _activeSignals.add(signal);
       _alreadySignalled.add(signal.securityId);
-      _log('Engine', 'DOMINANCE FOUND: ${signal.symbol} Entry=${signal.entryPrice} SL=${signal.stopLoss}');
+      final sigTime = '${signal.timestamp.hour.toString().padLeft(2, '0')}:${signal.timestamp.minute.toString().padLeft(2, '0')}';
+      final expTime = '${signal.expiryTime.hour.toString().padLeft(2, '0')}:${signal.expiryTime.minute.toString().padLeft(2, '0')}';
+      _log('Engine', 'DOMINANCE FOUND: ${signal.symbol} Entry=${signal.entryPrice} SL=${signal.stopLoss} Window=$sigTime→$expTime');
       _addKeyEvent('DOMINANCE: ${signal.symbol} Entry=${signal.entryPrice}');
 
       _sendUpdate('signal_found', {
@@ -422,6 +425,49 @@ class StrategyEngine {
         'stopLoss': signal.stopLoss,
         'reason': signal.reason,
       });
+
+      // Immediate breakout check: candle data we already fetched may show that
+      // the high exceeded dominance high during the screening delay.
+      // Without this, a breakout during the ~1 min screening loop is missed.
+      bool immediateBreakout = false;
+      if (_tradesPlacedToday < maxTrades) {
+        final candles = _todayCandles[signal.securityId];
+        if (candles != null && candles.isNotEmpty) {
+          final latestCandle = candles.last;
+          if (latestCandle.high > signal.entryPrice) {
+            _log('Engine', 'IMMEDIATE BREAKOUT: ${signal.symbol} candle high=${latestCandle.high} > Entry=${signal.entryPrice} (caught during screening)');
+            final trade = _calculateTrade(signal, latestCandle.high);
+            if (trade != null) {
+              _trades.add(trade);
+              _tradesPlacedToday++;
+              immediateBreakout = true;
+
+              _log('Engine', 'TRADE: ${trade.symbol} Qty=${trade.quantity} Entry=${trade.entryPrice} SL=${trade.stopLoss} Target=${trade.target}');
+              _addKeyEvent('TRADE: ${trade.symbol} Qty=${trade.quantity} @ ${trade.entryPrice} (immediate)');
+
+              _sendUpdate('trade_update', {
+                'type': 'entry',
+                'symbol': trade.symbol,
+                'securityId': trade.securityId,
+                'entryPrice': trade.entryPrice,
+                'quantity': trade.quantity,
+                'stopLoss': trade.stopLoss,
+                'target': trade.target,
+                'isPaper': trade.isPaperTrade,
+              });
+
+              if (!config.paperTrading) {
+                _placeLiveOrder(trade);
+              }
+            }
+          }
+        }
+      }
+
+      // Only add to active monitoring if no immediate breakout
+      if (!immediateBreakout) {
+        _activeSignals.add(signal);
+      }
     }
 
     if (signals.isNotEmpty) {
@@ -487,7 +533,7 @@ class StrategyEngine {
 
         // Check expiry
         if (DateTime.now().isAfter(signal.expiryTime)) {
-          _log('Engine', 'EXPIRED: ${signal.symbol} — no breakout before ${signal.expiryTime}');
+          _log('Engine', 'EXPIRED: ${signal.symbol} — no breakout before ${signal.expiryTime}, can be re-screened');
           _activeSignals.remove(signal);
           _alreadySignalled.remove(signal.securityId); // Can be re-screened
         }
@@ -747,17 +793,8 @@ class StrategyEngine {
 
   // ── API Helpers ───────────────────────────────────────────────────────
 
-  Future<void> _rateLimit() async {
-    final now = DateTime.now();
-    final elapsed = now.difference(_lastApiCall).inMilliseconds;
-    if (elapsed < _minApiDelayMs) {
-      await Future.delayed(Duration(milliseconds: _minApiDelayMs - elapsed));
-    }
-    _lastApiCall = DateTime.now();
-  }
-
   Future<List<Candle>> _fetchIntradayCandles(int secId, String interval, {DateTime? date}) async {
-    await _rateLimit();
+    await RateLimiter.instance.acquire(ApiCategory.data);
 
     final dateStr = _formatDate(date ?? DateTime.now());
     final maxRetries = 3;
@@ -789,7 +826,21 @@ class StrategyEngine {
           retryDelay *= 2;
           continue;
         }
-        if (response.statusCode != 200) return [];
+        // Dhan error 805 — too many requests
+        if (response.statusCode != 200) {
+          try {
+            final errBody = jsonDecode(response.body);
+            if (errBody is Map &&
+                (errBody['errorCode'] == '805' ||
+                    errBody['errorCode'] == 'DH-904') &&
+                attempt < maxRetries) {
+              await Future.delayed(Duration(milliseconds: retryDelay));
+              retryDelay *= 2;
+              continue;
+            }
+          } catch (_) {}
+          return [];
+        }
 
         return _parseCandles(response.body);
       } catch (e) {
@@ -806,7 +857,7 @@ class StrategyEngine {
   /// Fetch LTP for a batch of security IDs using OHLC endpoint.
   Future<Map<int, double>> _fetchLtpBatch(List<int> securityIds) async {
     if (securityIds.isEmpty) return {};
-    await _rateLimit();
+    await RateLimiter.instance.acquire(ApiCategory.quote);
 
     try {
       final response = await http.post(

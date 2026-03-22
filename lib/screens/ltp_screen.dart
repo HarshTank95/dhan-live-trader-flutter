@@ -84,6 +84,8 @@ class _LtpScreenState extends State<LtpScreen> {
       clientId: widget.clientId,
       accessToken: widget.accessToken,
     );
+    // Load Nifty index constituents from NSE (cached daily)
+    await _scripService.loadIndexConstituents();
     setState(() => _isLoadingScrips = false);
 
     // Step 3: Apply active watchlist

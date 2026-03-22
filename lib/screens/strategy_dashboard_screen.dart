@@ -63,10 +63,16 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen> {
   }
 
   Future<void> _checkRunning() async {
-    final running = await StrategyBackgroundService.isRunning();
-    if (running && mounted) {
-      setState(() => _isRunning = true);
+    final activeConfigId = await StorageService.getActiveStrategy();
+    if (activeConfigId != null && activeConfigId == widget.config.id) {
+      final running = await StrategyBackgroundService.isRunning();
+      if (running && mounted) {
+        setState(() => _isRunning = true);
+        return;
+      }
     }
+    // No active strategy or not this config — ensure stopped state
+    if (mounted) setState(() => _isRunning = false);
   }
 
   Future<void> _loadTrades() async {

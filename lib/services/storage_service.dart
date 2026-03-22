@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../models/backtest_result_model.dart';
 import '../models/daily_run_summary_model.dart';
 import '../models/strategy_config_model.dart';
 import '../models/strategy_trade_model.dart';
@@ -15,6 +16,23 @@ class StorageService {
   static const _keyStrategyConfigs = 'strategy_configs';
   static const _keyStrategyTrades = 'strategy_trades';
   static const _keyDailyRunHistory = 'daily_run_history';
+  static const _keyBacktestResults = 'backtest_results';
+  static const _keyActiveStrategyConfigId = 'active_strategy_config_id';
+
+  // ── Active Strategy Tracking ───────────────────────────────────────
+  static Future<void> setActiveStrategy(String? configId) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (configId == null) {
+      await prefs.remove(_keyActiveStrategyConfigId);
+    } else {
+      await prefs.setString(_keyActiveStrategyConfigId, configId);
+    }
+  }
+
+  static Future<String?> getActiveStrategy() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_keyActiveStrategyConfigId);
+  }
 
   // ── Credentials ──────────────────────────────────────────────────────
   static Future<void> saveCredentials({
@@ -187,5 +205,51 @@ class StorageService {
   static Future<void> clearAllDailyRunHistory() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_keyDailyRunHistory);
+  }
+
+  // ── Backtest Results ──────────────────────────────────────────────────
+  static Future<void> saveBacktestResult(BacktestResultModel result) async {
+    final prefs = await SharedPreferences.getInstance();
+    final results = await loadBacktestResults();
+
+    // Replace existing with same ID, or add new
+    results.removeWhere((r) => r.id == result.id);
+    results.insert(0, result); // newest first
+
+    // Keep max 20 backtest results
+    if (results.length > 20) {
+      results.removeRange(20, results.length);
+    }
+
+    final json = jsonEncode(results.map((r) => r.toJson()).toList());
+    await prefs.setString(_keyBacktestResults, json);
+  }
+
+  static Future<List<BacktestResultModel>> loadBacktestResults() async {
+    final prefs = await SharedPreferences.getInstance();
+    final json = prefs.getString(_keyBacktestResults);
+    if (json == null) return [];
+    try {
+      final list = jsonDecode(json) as List<dynamic>;
+      return list
+          .map((e) =>
+              BacktestResultModel.fromJson(e as Map<String, dynamic>))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  static Future<void> deleteBacktestResult(String id) async {
+    final prefs = await SharedPreferences.getInstance();
+    final results = await loadBacktestResults();
+    results.removeWhere((r) => r.id == id);
+    final json = jsonEncode(results.map((r) => r.toJson()).toList());
+    await prefs.setString(_keyBacktestResults, json);
+  }
+
+  static Future<void> clearAllBacktestResults() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_keyBacktestResults);
   }
 }

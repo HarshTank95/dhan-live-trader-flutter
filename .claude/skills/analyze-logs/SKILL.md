@@ -20,20 +20,22 @@ YYYY-MM-DD HH:MM:SS [LEVEL] Tag: Message
 ```
 
 Levels: `INFO`, `ERROR`, `WARN`, `STRAT`, `TRADE`
-Tags: `App`, `BgService`, `Engine`, `Scan`, `Zone`, `StrategyList`
+Tags: `App`, `BgService`, `Engine`, `Scan`, `Backtest`, `Zone`, `StrategyList`
 
 ## Step 3: Analyze and Report
 
 Produce a structured report with these sections:
 
 ### A. Run Summary
-- **Start time** and **end time** of the strategy run
-- **Config**: strategy name, mode (Paper/Live), config ID
+- **Run type**: Live Engine run OR Backtest run (detect from `═══ STRATEGY ENGINE STARTING ═══` vs `═══ BACKTEST STARTING ═══`)
+- **Start time** and **end time** of the run
+- **Config**: strategy name, mode (Paper/Live), config ID (for live), or period/universe (for backtest)
 - **Final status**: completed / stopped / error / crashed
 - **Total duration** of the run
 
 ### B. Phase Timeline
-Map log entries to these phases and show timestamps:
+
+**For Live Engine runs**, map log entries to these phases:
 1. **Initialization** — `BgService: Configuring service`, `isolate_started`
 2. **Loading Instruments** — `Step 1: Loading instruments`
 3. **Pre-Market Data** — `Step 2: Loading X days of historical data`, progress lines `Pre-market progress: X/Y`
@@ -44,6 +46,13 @@ Map log entries to these phases and show timestamps:
 8. **Position Monitoring** — `Monitoring open positions`
 9. **Completion** — `STRATEGY ENGINE COMPLETE`, `END OF DAY SUMMARY`
 
+**For Backtest runs**, map log entries to these phases:
+1. **Start** — `═══ BACKTEST STARTING ═══`, strategy name, period, universe, risk/target params
+2. **Download** — `Downloading candle data for X stocks`, `Downloaded X/Y stocks`
+3. **Simulation** — Per-day simulation: `DOMINANCE [date]:`, `BREAKOUT [date]:`, `SL HIT [date]:`, `TARGET [date]:`, `EOD EXIT [date]:`
+4. **Per-day summaries** — `YYYY-MM-DD: X signals, Y trades, P&L: ₹Z`
+5. **Completion** — `═══ BACKTEST COMPLETE ═══`, summary stats (trading days, signals, trades, wins, losses, win rate, P&L, max drawdown, duration)
+
 ### C. Stock Elimination Breakdown
 Parse all `Eliminated` log lines and build a table:
 
@@ -53,11 +62,20 @@ Parse all `Eliminated` log lines and build a table:
 Show the progressive reduction funnel (e.g., 408 -> 154 -> 84 -> ... -> 5).
 
 ### D. Dominance & Breakout Results
+
+**For Live Engine:**
 - List all `DOMINANCE FOUND` entries with symbol, entry, SL
 - List all `BREAKOUT` entries
 - List all `TRADE` entries with full details (symbol, qty, entry, SL, target)
 - If `REJECTION SUMMARY` exists, show which rules eliminated the most candles
 - If individual `REJECT` lines exist, show top 5 most-rejected stocks and their failure reasons
+
+**For Backtest:**
+- List all `DOMINANCE [date]: SYMBOL Entry=X SL=Y` entries
+- List all `BREAKOUT [date]: SYMBOL @ X Qty=N SL=Y Target=Z` entries
+- List all exits: `SL HIT [date]`, `TARGET [date]`, `EOD EXIT [date]` with P&L
+- Build a per-day P&L table from the day summary lines
+- Show overall backtest metrics from the `═══ BACKTEST COMPLETE ═══` block
 
 ### E. Error Analysis
 - List ALL `[ERROR]` entries

@@ -88,21 +88,174 @@ class ScripService {
     }
   }
 
-  // ── Nifty 500 stock universe (matches C# GetNseEquities) ────────────
-  /// Returns security IDs of all loaded NSE EQ scrips that are in the
-  /// Nifty 500 list. Mirrors C#: InstrumentService.GetNseEquities(limit).
-  List<int> getNifty500SecurityIds({int limit = 500}) {
-    return _scrips
-        .where((s) => Nifty500Stocks.isNifty500(s.symbol))
-        .take(limit)
-        .map((s) => s.securityId)
+  // ── Nifty index constituents (fetched from official NSE source) ─────
+
+  // Cached index symbols fetched from niftyindices.com
+  Set<String> _nifty50Symbols = {};
+  Set<String> _nifty200Symbols = {};
+  Set<String> _nifty500Symbols = {};
+  bool _indexSymbolsLoaded = false;
+
+  static const _indexBaseUrl = 'https://www.niftyindices.com/IndexConstituent';
+  static const _indexCacheKey = 'nifty_index_cache_date';
+
+  /// Fetch Nifty index constituent lists from official NSE source.
+  /// Caches for the day. Falls back to hardcoded list if fetch fails.
+  Future<void> loadIndexConstituents() async {
+    if (_indexSymbolsLoaded) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final cachedDate = prefs.getString(_indexCacheKey) ?? '';
+    final today = _today();
+
+    // Try loading from cache first
+    if (cachedDate == today) {
+      final cached50 = prefs.getStringList('nifty50_symbols');
+      final cached200 = prefs.getStringList('nifty200_symbols');
+      final cached500 = prefs.getStringList('nifty500_symbols');
+      if (cached500 != null && cached500.isNotEmpty) {
+        _nifty50Symbols = cached50?.toSet() ?? {};
+        _nifty200Symbols = cached200?.toSet() ?? {};
+        _nifty500Symbols = cached500.toSet();
+        _indexSymbolsLoaded = true;
+        return;
+      }
+    }
+
+    // Fetch from niftyindices.com
+    try {
+      final results = await Future.wait([
+        _fetchIndexCsv('ind_nifty50list.csv'),
+        _fetchIndexCsv('ind_nifty200list.csv'),
+        _fetchIndexCsv('ind_nifty500list.csv'),
+      ]);
+
+      if (results[2].isNotEmpty) {
+        _nifty50Symbols = results[0];
+        _nifty200Symbols = results[1];
+        _nifty500Symbols = results[2];
+        _indexSymbolsLoaded = true;
+
+        // Cache for the day
+        await prefs.setStringList('nifty50_symbols', _nifty50Symbols.toList());
+        await prefs.setStringList('nifty200_symbols', _nifty200Symbols.toList());
+        await prefs.setStringList('nifty500_symbols', _nifty500Symbols.toList());
+        await prefs.setString(_indexCacheKey, today);
+
+        return;
+      }
+    } catch (_) {}
+
+    // Fallback to hardcoded list
+    _nifty500Symbols = Nifty500Stocks.symbols;
+    _indexSymbolsLoaded = true;
+  }
+
+  // NSE symbol → Dhan trading symbol mapping for known mismatches
+  static const _symbolAliases = <String, String>{
+    // Add mappings here as: 'NSE_SYMBOL': 'DHAN_SYMBOL'
+    // e.g. 'RELINFRA': 'RELIANCEINFRA',
+  };
+
+  Future<Set<String>> _fetchIndexCsv(String fileName) async {
+    try {
+      final response = await http.get(
+        Uri.parse('$_indexBaseUrl/$fileName'),
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'text/csv,text/plain,*/*',
+        },
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode != 200) return {};
+
+      final symbols = <String>{};
+      final lines = response.body.split('\n');
+      for (int i = 1; i < lines.length; i++) { // skip header
+        final line = lines[i].trim();
+        if (line.isEmpty) continue;
+        // CSV columns: Company Name, Industry, Symbol, Series, ISIN
+        final parts = line.split(',');
+        if (parts.length >= 3) {
+          final symbol = parts[2].trim().replaceAll('"', '');
+          if (symbol.isNotEmpty && symbol != 'Symbol') {
+            symbols.add(symbol.toUpperCase());
+          }
+        }
+      }
+      return symbols;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// Returns security IDs for a given index universe.
+  /// Uses dynamically fetched constituents; falls back to hardcoded list.
+  List<int> getSecurityIdsForUniverse(String universe) {
+    Set<String> indexSymbols;
+    switch (universe) {
+      case 'Nifty 50':
+        indexSymbols = _nifty50Symbols.isNotEmpty ? _nifty50Symbols : Nifty500Stocks.symbols;
+        break;
+      case 'Nifty 200':
+        indexSymbols = _nifty200Symbols.isNotEmpty ? _nifty200Symbols : Nifty500Stocks.symbols;
+        break;
+      default:
+        indexSymbols = _nifty500Symbols.isNotEmpty ? _nifty500Symbols : Nifty500Stocks.symbols;
+    }
+
+    // Build expanded set: original NSE symbols + Dhan aliases
+    final expandedSymbols = <String>{...indexSymbols};
+    for (final entry in _symbolAliases.entries) {
+      if (indexSymbols.contains(entry.key)) {
+        expandedSymbols.add(entry.value);
+      }
+    }
+
+    final matched = _scrips
+        .where((s) => expandedSymbols.contains(s.symbol.toUpperCase()))
         .toList();
+
+    // For Nifty 50 with hardcoded fallback, take first 50
+    if (universe == 'Nifty 50' && _nifty50Symbols.isEmpty) {
+      return matched.take(50).map((s) => s.securityId).toList();
+    }
+    if (universe == 'Nifty 200' && _nifty200Symbols.isEmpty) {
+      return matched.take(200).map((s) => s.securityId).toList();
+    }
+
+    return matched.map((s) => s.securityId).toList();
+  }
+
+  /// Legacy method — kept for backward compatibility.
+  List<int> getNifty500SecurityIds({int limit = 500}) {
+    return getSecurityIdsForUniverse(
+      limit <= 50 ? 'Nifty 50' : limit <= 200 ? 'Nifty 200' : 'Nifty 500',
+    );
   }
 
   /// Returns ScripInfo list for Nifty 500 stocks.
   List<ScripInfo> getNifty500Scrips({int limit = 500}) {
+    final universe = limit <= 50 ? 'Nifty 50' : limit <= 200 ? 'Nifty 200' : 'Nifty 500';
+    Set<String> indexSymbols;
+    switch (universe) {
+      case 'Nifty 50':
+        indexSymbols = _nifty50Symbols.isNotEmpty ? _nifty50Symbols : Nifty500Stocks.symbols;
+        break;
+      case 'Nifty 200':
+        indexSymbols = _nifty200Symbols.isNotEmpty ? _nifty200Symbols : Nifty500Stocks.symbols;
+        break;
+      default:
+        indexSymbols = _nifty500Symbols.isNotEmpty ? _nifty500Symbols : Nifty500Stocks.symbols;
+    }
+    final expandedSymbols = <String>{...indexSymbols};
+    for (final entry in _symbolAliases.entries) {
+      if (indexSymbols.contains(entry.key)) {
+        expandedSymbols.add(entry.value);
+      }
+    }
     return _scrips
-        .where((s) => Nifty500Stocks.isNifty500(s.symbol))
+        .where((s) => expandedSymbols.contains(s.symbol.toUpperCase()))
         .take(limit)
         .toList();
   }

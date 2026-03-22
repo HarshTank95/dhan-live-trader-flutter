@@ -154,7 +154,7 @@ Default: Risk INR 500, Target INR 2000 per trade, max 2 trades/day.
 - Small persistent notification: "Strategy Name (Paper/Live) — Scanning stocks..."
 - Requests notification permission on Android 13+ before starting
 - Auto-stops when strategy completes or user taps STOP
-- Detects running state when app is reopened
+- **Active strategy tracking**: Persists running config ID in SharedPreferences to prevent false "running" state on app restart (service stays alive but strategy may have completed)
 
 ### Plugin Architecture
 - `BaseStrategy` abstract class with lifecycle: `prepare()` → `scan()` → `checkBreakout()` → `checkExit()`
@@ -162,10 +162,76 @@ Default: Risk INR 500, Target INR 2000 per trade, max 2 trades/day.
 - `StrategyParamDef` drives auto-generated config UI from parameter definitions
 - Easily extensible — add new strategies by implementing `BaseStrategy` and registering in the registry
 
-### Nifty 500 Stock Universe
-- Hard-coded symbol list in `lib/data/nifty500_stocks.dart` (mirrors C# `Nifty500Stocks.cs`)
-- `ScripService.getNifty500SecurityIds()` filters loaded NSE EQ instruments by Nifty 500 membership
-- Matches C# `InstrumentService.GetNseEquities()` behavior exactly
+### Nifty Index Stock Universe (Dynamic)
+- **Dynamically fetched** from official NSE source (`niftyindices.com`) — Nifty 50, 200, 500 CSV files
+- Cached daily in SharedPreferences; falls back to hardcoded list if fetch fails
+- `ScripService.getSecurityIdsForUniverse('Nifty 500')` matches fetched symbols against Dhan scrip master
+- Symbol alias mapping for known NSE↔Dhan name mismatches (e.g., renamed stocks)
+- Existing saved strategy configs auto-refresh their security IDs on app load
+- Currently matches **498/500** stocks (2 suspended/delisted stocks not in Dhan)
+- Hardcoded fallback list in `lib/data/nifty500_stocks.dart` (mirrors C# `Nifty500Stocks.cs`)
+
+### Signal Expiry & Re-screening
+- Signals expire at the next scan interval boundary (e.g., found at 9:35 → expires at 9:40)
+- Expired signals are removed from `alreadySignalled`, allowing the stock to be re-screened
+- Consistent between live engine and backtest engine
+
+### Duplicate Trade Prevention
+- Same stock cannot be traded twice on the same day (tracked via `tradedSecIds` set)
+- Consistent between live engine and backtest engine
+
+### Immediate Breakout Detection (Live)
+- After dominance screening (~1 min loop for 500 stocks), checks if breakout already happened during the delay
+- Uses already-fetched candle data: if `latestCandle.high > entryPrice`, triggers immediate trade
+- Prevents missing breakouts that occur during the screening window
+
+---
+
+## Backtest Engine
+
+Run the same Dominance + Breakout strategy on historical data to validate before live trading.
+
+### How It Works
+```
+Select date range + stock universe (Nifty 50 / 200 / 500)
+  ↓
+Download historical 5-min candles for all stocks (with progress UI)
+  ↓
+Per trading day:
+  1. Compute stats from prior N days (same as live prepare())
+  2. Progressive volume elimination at each scan interval
+  3. Dominance screening with signal expiry & re-screening
+  4. Breakout detection: candle.high > entry within expiry window
+  5. Exit simulation: SL (conservative) / Target / EOD close
+  ↓
+Aggregate results: per-day and overall P&L, win/loss, drawdown
+```
+
+### Key Design Decisions
+- **Breakout proxy**: Live uses `LTP > entry`, backtest uses `candle.high > entry` (correct proxy without tick data)
+- **Conservative exit**: If same candle hits both SL and target, assume SL hit first
+- **Signal expiry**: Matches live — breakout must happen within the scan interval window
+- **Duplicate prevention**: Same stock cannot be traded twice per day (matches live)
+- **Re-screening**: After signal expiry, stock is removed from `alreadySignalled` and can be re-screened
+
+### Backtest UI
+- **Config screen**: Date range presets (7d/30d/90d/6m/1y), stock universe selector, SL/target/max trades sliders
+- **API usage estimate**: Shows estimated calls needed vs remaining quota
+- **Progress screen**: Real-time download progress with cancel button (UI stays responsive via event loop yielding)
+- **Results screen**: Summary stats, daily P&L chart, per-day details with entry/exit times, individual trade list
+- Access via **3-dot menu → Backtest** on each strategy card
+
+### Live vs Backtest Comparison Logging
+Both engines log at identical decision points for side-by-side comparison:
+- `DOMINANCE`: symbol, entry, SL, time window (signal→expiry)
+- `BREAKOUT`: symbol, price, time, quantity, SL, target
+- `EXPIRED`: symbol, re-screening note
+- `SL HIT` / `TARGET` / `EOD EXIT`: symbol, exit price, P&L
+- `SKIP`: reason (max trades reached / already traded today)
+- `NO BREAKOUT`: signal that expired without breakout, with window details
+- `DAY SUMMARY` (backtest only): stocks scanned, after elimination, signals, trades, W/L, P&L
+
+Live logs tagged as `[INFO] Engine:`, backtest as `[INFO] Backtest:` — both visible in **Drawer → View Logs**.
 
 ---
 
@@ -214,17 +280,22 @@ lib/
 │   ├── strategy_config_screen.dart        # Auto-generated param editor from StrategyParamDef
 │   ├── strategy_dashboard_screen.dart     # Strategy run dashboard (phase stepper, candidates, activity)
 │   ├── strategy_history_screen.dart       # Daily run history with details and delete
+│   ├── backtest_config_screen.dart        # Backtest setup: date range, universe, params, API estimate
+│   ├── backtest_progress_screen.dart      # Backtest download progress with cancel support
+│   ├── backtest_results_screen.dart       # Backtest results: summary, daily chart, trades with entry/exit times
 │   └── log_viewer_screen.dart             # On-device log viewer with filter, copy, and share/export
 │
 ├── services/
 │   ├── dhan_service.dart                  # Dhan REST API calls (OHLC, charts, holdings, funds)
 │   ├── dhan_feed_service.dart             # Dhan WebSocket binary feed (live prices)
 │   ├── rate_limiter.dart                  # Centralized API rate limiter (singleton)
-│   ├── scrip_service.dart                 # Scrip master download, parse, cache, Nifty 500 filter (singleton)
-│   ├── storage_service.dart               # SharedPreferences: credentials, watchlists, theme, configs, trades
+│   ├── scrip_service.dart                 # Scrip master + dynamic NSE index fetching (singleton)
+│   ├── candle_repository.dart             # Historical candle download with caching and progress
+│   ├── storage_service.dart               # SharedPreferences: credentials, watchlists, theme, configs, trades, active strategy
 │   ├── app_logger.dart                    # File-based logger with memory buffer
 │   ├── strategy_background_service.dart   # Android foreground service for background strategy execution
-│   └── strategy_engine.dart               # Strategy execution engine (runs in background isolate)
+│   ├── strategy_engine.dart               # Live strategy execution engine (runs in background isolate)
+│   └── backtest_engine.dart               # Backtest simulation engine (same rules as live)
 │
 └── strategies/
     ├── base_strategy.dart                 # Abstract strategy interface + StrategyParamDef
@@ -423,6 +494,21 @@ Screening window ends → auto-stop → show results
 ### 14. Strategy securityIds Always Empty
 **Problem:** New strategy defaulted to `securityIds = []` — 0 stocks to scan. **Fix:** Auto-populate from Nifty 500 list on strategy creation.
 
+### 15. UI Freeze During Backtest Download
+**Problem:** App froze at ~70/409 stocks, cancel button unresponsive. **Cause:** Tight async loop without yielding to event loop. **Fix:** Added `await Future.delayed(Duration.zero)` every iteration + 15s HTTP timeout.
+
+### 16. False "Running" State on App Restart
+**Problem:** Strategy showed STOP button on app restart even when not started. **Cause:** Background service stays alive as foreground service; `isRunning()` always returns true. **Fix:** Persist active strategy config ID in SharedPreferences, check it matches before showing running state.
+
+### 17. Backtest Signal Expiry Missing
+**Problem:** Backtest allowed breakouts at any time (e.g., 14:00) instead of within 5-min expiry window like live. **Fix:** Override DateTime.now()-based timestamps with candle time, add expiry window check in breakout detection, re-screen after expiry.
+
+### 18. Same Stock Traded Twice in Backtest
+**Problem:** After adding re-screening, same stock could get multiple breakout trades on same day. **Fix:** Added `tradedSecIds` set to prevent duplicate trades per day.
+
+### 19. Only ~410 Stocks Instead of 500
+**Problem:** Hardcoded `nifty500_stocks.dart` was incomplete and many symbols didn't match Dhan's scrip master. **Fix:** Dynamic fetching from official NSE website (niftyindices.com), cached daily, with hardcoded fallback.
+
 ---
 
 ## Build Phases
@@ -452,12 +538,24 @@ Screening window ends → auto-stop → show results
 - Log export/share via Android share sheet
 - Auto-stop at end of screening window
 
-### Phase 4 (Next)
+### Phase 4 (Complete)
+- Backtest engine with historical candle simulation
+- Backtest config screen (date range, universe, API estimate)
+- Backtest progress screen with cancel support and UI freeze fix
+- Backtest results screen with daily P&L chart, entry/exit times
+- Dynamic Nifty index fetching from official NSE source (niftyindices.com)
+- Signal expiry & re-screening in backtest (matching live engine)
+- Duplicate trade prevention in backtest (matching live engine)
+- Immediate breakout detection in live engine (catches breakouts during screening delay)
+- Active strategy tracking to fix false running state on app restart
+- Comparison logging for live vs backtest debugging
+
+### Phase 5 (Next)
 - Live trading via Dhan Order API
 - Order placement, confirmation, and monitoring
 - End-of-day auto-square-off
 
-### Phase 5
+### Phase 6
 - Auto-schedule (start strategy at fixed time daily)
 - Trade history and analytics
 - Multiple concurrent strategies

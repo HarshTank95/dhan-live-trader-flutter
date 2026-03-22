@@ -174,6 +174,7 @@ class RateLimiterStats {
   });
 
   double get dataUsagePercent => (dataCallsToday / dataCallsLimit) * 100;
+  int get dataCallsRemaining => dataCallsLimit - dataCallsToday;
 
   @override
   String toString() =>

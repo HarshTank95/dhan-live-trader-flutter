@@ -7,6 +7,7 @@ import '../services/storage_service.dart';
 import '../services/strategy_background_service.dart';
 import '../strategies/base_strategy.dart';
 import '../strategies/strategy_registry.dart';
+import 'backtest_config_screen.dart';
 import 'strategy_config_screen.dart';
 import 'strategy_dashboard_screen.dart';
 
@@ -62,6 +63,7 @@ class _StrategyListScreenState extends State<StrategyListScreen> {
           if (status == 'stopped' || status == 'completed') {
             _runningStates.updateAll((key, value) => false);
             _statusMessage = '';
+            StorageService.setActiveStrategy(null);
           }
         });
       }
@@ -69,6 +71,7 @@ class _StrategyListScreenState extends State<StrategyListScreen> {
 
     _subs.add(StrategyBackgroundService.onCompleted.listen((event) {
       if (event == null || !mounted) return;
+      StorageService.setActiveStrategy(null);
       setState(() {
         _runningStates.updateAll((key, value) => false);
       });
@@ -85,12 +88,17 @@ class _StrategyListScreenState extends State<StrategyListScreen> {
   }
 
   Future<void> _checkServiceRunning() async {
+    final activeConfigId = await StorageService.getActiveStrategy();
+    if (activeConfigId == null || !mounted) return;
+
     final running = await StrategyBackgroundService.isRunning();
-    if (running && mounted && _configs.isNotEmpty) {
-      // Mark first config as running (service tracks which one)
+    if (running && _configs.any((c) => c.id == activeConfigId)) {
       setState(() {
-        _runningStates[_configs.first.id] = true;
+        _runningStates[activeConfigId] = true;
       });
+    } else {
+      // Service not running but stale flag — clear it
+      await StorageService.setActiveStrategy(null);
     }
   }
 
@@ -106,6 +114,18 @@ class _StrategyListScreenState extends State<StrategyListScreen> {
       }
     }
 
+    // Refresh security IDs from dynamic index list
+    final scripService = ScripService();
+    if (scripService.isLoaded) {
+      final freshIds = scripService.getSecurityIdsForUniverse('Nifty 500');
+      if (freshIds.length > configs.first.securityIds.length) {
+        for (final c in configs) {
+          c.securityIds = freshIds;
+        }
+        await StorageService.saveStrategyConfigs(configs);
+      }
+    }
+
     if (mounted) setState(() { _configs = configs; _isLoading = false; });
   }
 
@@ -116,7 +136,7 @@ class _StrategyListScreenState extends State<StrategyListScreen> {
 
     final scripService = ScripService();
     final nifty500Ids = scripService.isLoaded
-        ? scripService.getNifty500SecurityIds()
+        ? scripService.getSecurityIdsForUniverse('Nifty 500')
         : <int>[];
 
     return StrategyConfigModel(
@@ -191,7 +211,7 @@ class _StrategyListScreenState extends State<StrategyListScreen> {
       }
       return;
     }
-    final nifty500Ids = scripService.getNifty500SecurityIds();
+    final nifty500Ids = scripService.getSecurityIdsForUniverse('Nifty 500');
 
     final config = StrategyConfigModel(
       strategyType: strategy.type,
@@ -294,6 +314,7 @@ class _StrategyListScreenState extends State<StrategyListScreen> {
       if (!mounted) return;
 
       if (started) {
+        await StorageService.setActiveStrategy(config.id);
         setState(() => _runningStates[config.id] = true);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -312,6 +333,7 @@ class _StrategyListScreenState extends State<StrategyListScreen> {
     } else {
       // Stopping
       await StrategyBackgroundService.stopService();
+      await StorageService.setActiveStrategy(null);
 
       if (mounted) {
         setState(() => _runningStates[config.id] = false);
@@ -485,10 +507,29 @@ class _StrategyListScreenState extends State<StrategyListScreen> {
                           if (value == 'edit') _openConfig(config);
                           if (value == 'delete') _delete(config);
                           if (value == 'dashboard') _openDashboard(config);
+                          if (value == 'backtest') {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => BacktestConfigScreen(
+                                  accessToken: widget.accessToken,
+                                  clientId: widget.clientId,
+                                ),
+                              ),
+                            );
+                          }
                         },
                         itemBuilder: (_) => [
                           const PopupMenuItem(
                               value: 'dashboard', child: Text('View Dashboard')),
+                          const PopupMenuItem(
+                              value: 'backtest',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.science, size: 18, color: Colors.purple),
+                                  SizedBox(width: 8),
+                                  Text('Backtest'),
+                                ],
+                              )),
                           const PopupMenuItem(
                               value: 'edit', child: Text('Edit Config')),
                           const PopupMenuItem(

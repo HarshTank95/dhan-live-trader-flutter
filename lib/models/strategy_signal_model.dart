@@ -6,10 +6,10 @@ class StrategySignalModel {
   final int securityId;
   final String symbol;
   final SignalType type;
-  final DateTime timestamp;
+  DateTime timestamp;
   final double entryPrice; // dominance high
   final double stopLoss; // dominance low
-  final DateTime expiryTime; // next candle fetch time
+  DateTime expiryTime; // next candle fetch time
 
   // Dominance candle OHLCV for display
   final double candleOpen;
@@ -27,7 +27,7 @@ class StrategySignalModel {
 
   final String reason;
 
-  const StrategySignalModel({
+  StrategySignalModel({
     required this.id,
     required this.strategyConfigId,
     required this.securityId,
