@@ -22,6 +22,7 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
   final _searchController = TextEditingController();
   List<ScripInfo> _searchResults = [];
   bool _isSearching = false;
+  ScripSegment? _selectedSegment;
 
   @override
   void initState() {
@@ -32,7 +33,10 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
   void _onSearchChanged(String query) {
     setState(() {
       _isSearching = query.isNotEmpty;
-      _searchResults = widget.scripService.search(query);
+      _searchResults = widget.scripService.searchWithFilter(
+        query,
+        segment: _selectedSegment,
+      );
     });
   }
 
@@ -90,7 +94,7 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
               controller: _searchController,
               onChanged: _onSearchChanged,
               decoration: InputDecoration(
-                hintText: 'Search stocks (e.g. HDFC, Infosys...)',
+                hintText: 'Search stocks & F&O...',
                 prefixIcon: const Icon(Icons.search),
                 suffixIcon: _searchController.text.isNotEmpty
                     ? IconButton(
@@ -108,6 +112,22 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
             ),
           ),
 
+          // Segment filter chips
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              children: [
+                _filterChip('All', null),
+                const SizedBox(width: 6),
+                _filterChip('Equity', ScripSegment.equity),
+                const SizedBox(width: 6),
+                _filterChip('Futures', ScripSegment.futures),
+                const SizedBox(width: 6),
+                _filterChip('Options', ScripSegment.options),
+              ],
+            ),
+          ),
+          const SizedBox(height: 4),
           Expanded(
             child: _isSearching
                 ? _buildSearchResults()
@@ -196,9 +216,33 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
     );
   }
 
+  Widget _filterChip(String label, ScripSegment? value) {
+    final selected = _selectedSegment == value;
+    return ChoiceChip(
+      label: Text(label, style: const TextStyle(fontSize: 12)),
+      selected: selected,
+      onSelected: (_) {
+        setState(() => _selectedSegment = value);
+        _onSearchChanged(_searchController.text);
+      },
+      visualDensity: VisualDensity.compact,
+    );
+  }
+
+  Color _segmentColor(ScripSegment segment) {
+    switch (segment) {
+      case ScripSegment.equity:
+        return Colors.blue;
+      case ScripSegment.futures:
+        return Colors.orange;
+      case ScripSegment.options:
+        return Colors.purple;
+    }
+  }
+
   Widget _buildSearchResults() {
     if (_searchResults.isEmpty) {
-      return const Center(child: Text('No stocks found'));
+      return const Center(child: Text('No results found'));
     }
 
     return Column(
@@ -223,23 +267,58 @@ class _WatchlistScreenState extends State<WatchlistScreen> {
             itemBuilder: (context, index) {
               final scrip = _searchResults[index];
               final isAdded = _watchlist.contains(scrip.securityId);
+              final color = isAdded ? Colors.green : _segmentColor(scrip.segment);
               return ListTile(
                 leading: CircleAvatar(
-                  backgroundColor:
-                      isAdded ? Colors.green.shade100 : Colors.blue.shade50,
+                  backgroundColor: color.withValues(alpha: 0.15),
                   child: Text(
-                    scrip.symbol[0],
+                    scrip.underlying[0],
                     style: TextStyle(
-                      color: isAdded ? Colors.green : Colors.blue,
+                      color: color,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
                 ),
-                title: Text(scrip.symbol,
-                    style: const TextStyle(fontWeight: FontWeight.bold)),
-                subtitle: Text(scrip.name,
-                    style: const TextStyle(fontSize: 12),
-                    overflow: TextOverflow.ellipsis),
+                title: Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        scrip.segment == ScripSegment.equity
+                            ? scrip.symbol
+                            : scrip.displayName,
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (scrip.segment != ScripSegment.equity) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: _segmentColor(scrip.segment).withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          scrip.segment == ScripSegment.futures
+                              ? 'FUT'
+                              : scrip.optionType ?? 'OPT',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: _segmentColor(scrip.segment),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                subtitle: Text(
+                  scrip.segment == ScripSegment.equity
+                      ? scrip.name
+                      : 'Lot: ${scrip.lotSize?.toInt() ?? '?'}',
+                  style: const TextStyle(fontSize: 12),
+                  overflow: TextOverflow.ellipsis,
+                ),
                 trailing: isAdded
                     ? const Icon(Icons.check_circle, color: Colors.green)
                     : IconButton(

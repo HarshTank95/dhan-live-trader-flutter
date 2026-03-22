@@ -5,29 +5,105 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../data/nifty500_stocks.dart';
 
+// ── Segment enum ─────────────────────────────────────────────────────────────
+
+enum ScripSegment { equity, futures, options }
+
+// ── ScripInfo model ──────────────────────────────────────────────────────────
+
 class ScripInfo {
   final String symbol;
   final String name;
   final int securityId;
+  final ScripSegment segment;
+  final String exchangeSegment; // 'NSE_EQ' or 'NSE_FNO'
+  final String? instrumentType; // EQUITY, FUTIDX, FUTSTK, OPTIDX, OPTSTK
+  final DateTime? expiryDate;
+  final double? strikePrice;
+  final String? optionType; // CE or PE
+  final double? lotSize;
+  final String? underlyingSymbol; // e.g. "TATAMOTORS" for F&O instruments
 
   const ScripInfo({
     required this.symbol,
     required this.name,
     required this.securityId,
+    this.segment = ScripSegment.equity,
+    this.exchangeSegment = 'NSE_EQ',
+    this.instrumentType,
+    this.expiryDate,
+    this.strikePrice,
+    this.optionType,
+    this.lotSize,
+    this.underlyingSymbol,
   });
+
+  /// Display name for search results
+  String get displayName {
+    switch (segment) {
+      case ScripSegment.futures:
+        final exp = expiryDate != null ? _fmtExpiry(expiryDate!) : '';
+        return '$symbol FUT $exp';
+      case ScripSegment.options:
+        final exp = expiryDate != null ? _fmtExpiry(expiryDate!) : '';
+        final strike = strikePrice?.toStringAsFixed(strikePrice! == strikePrice!.roundToDouble() ? 0 : 2) ?? '';
+        return '$symbol $strike ${optionType ?? ''} $exp';
+      default:
+        return symbol;
+    }
+  }
+
+  bool get isExpired =>
+      expiryDate != null && expiryDate!.isBefore(DateTime.now());
+
+  /// Underlying symbol (e.g. "TATAMOTORS" for any TATAMOTORS F&O instrument)
+  String get underlying {
+    if (underlyingSymbol != null) return underlyingSymbol!;
+    // Fallback: strip after first dash (e.g. "RELIANCE-Mar2026-FUT" → "RELIANCE")
+    final dash = symbol.indexOf('-');
+    return dash > 0 ? symbol.substring(0, dash) : symbol;
+  }
+
+  static String _fmtExpiry(DateTime d) {
+    const months = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return '${d.day} ${months[d.month]} ${d.year}';
+  }
 
   Map<String, dynamic> toJson() => {
         'symbol': symbol,
         'name': name,
         'securityId': securityId,
+        'segment': segment.index,
+        'exchangeSegment': exchangeSegment,
+        if (instrumentType != null) 'instrumentType': instrumentType,
+        if (expiryDate != null) 'expiryDate': expiryDate!.toIso8601String(),
+        if (strikePrice != null) 'strikePrice': strikePrice,
+        if (optionType != null) 'optionType': optionType,
+        if (lotSize != null) 'lotSize': lotSize,
+        if (underlyingSymbol != null) 'underlyingSymbol': underlyingSymbol,
       };
 
   factory ScripInfo.fromJson(Map<String, dynamic> json) => ScripInfo(
         symbol: json['symbol'] as String,
         name: json['name'] as String,
         securityId: json['securityId'] as int,
+        segment: ScripSegment.values.elementAtOrNull(
+                json['segment'] as int? ?? 0) ??
+            ScripSegment.equity,
+        exchangeSegment: json['exchangeSegment'] as String? ?? 'NSE_EQ',
+        instrumentType: json['instrumentType'] as String?,
+        expiryDate: json['expiryDate'] != null
+            ? DateTime.tryParse(json['expiryDate'] as String)
+            : null,
+        strikePrice: (json['strikePrice'] as num?)?.toDouble(),
+        optionType: json['optionType'] as String?,
+        lotSize: (json['lotSize'] as num?)?.toDouble(),
+        underlyingSymbol: json['underlyingSymbol'] as String?,
       );
 }
+
+// ── ScripService ─────────────────────────────────────────────────────────────
 
 class ScripService {
   // Singleton instance — scrips are loaded once and shared across the app.
@@ -37,31 +113,34 @@ class ScripService {
 
   // Authenticated endpoint — returns NSE_EQ only (much smaller than full CSV)
   static const _nseEqUrl = 'https://api.dhan.co/v2/instrument/NSE_EQ';
+  static const _nseFnoUrl = 'https://api.dhan.co/v2/instrument/NSE_FNO';
   // Public fallback — full master with all segments
   static const _fallbackUrl =
       'https://images.dhan.co/api-data/api-scrip-master.csv';
   static const _cacheKey = 'scrip_cache_date';
   static const _cacheFile = 'scrips_cache.json';
+  static const _fnoCacheKey = 'scrip_fno_cache_date_v2'; // v2: includes underlyingSymbol
+  static const _fnoCacheFile = 'scrips_fno_cache_v2.json';
 
   // Default watchlist security IDs
   static const List<int> defaultWatchlist = [2885, 11536, 1594, 1333, 1660];
 
-  List<ScripInfo> _scrips = [];
+  List<ScripInfo> _scrips = []; // equity only
+  List<ScripInfo> _fnoScrips = []; // futures + options
   bool get isLoaded => _scrips.isNotEmpty;
+  bool get isFnoLoaded => _fnoScrips.isNotEmpty;
 
-  // ── Load scrips (cache-first, download if stale) ────────────────────
-  //
-  // Passes credentials so we can use the authenticated NSE_EQ endpoint
-  // (returns only ~2,000 equity rows vs the full 50,000-row master CSV).
+  // ── Load equity scrips (cache-first, download if stale) ────────────────
   Future<void> loadScrips({String? clientId, String? accessToken}) async {
     final prefs = await SharedPreferences.getInstance();
     final cachedDate = prefs.getString(_cacheKey) ?? '';
     final today = _today();
 
     if (cachedDate == today) {
-      final cached = await _loadFromFile();
+      final cached = await _loadFromFile(_cacheFile);
       if (cached != null && cached.isNotEmpty) {
         _scrips = cached;
+        await _loadFnoScrips(clientId: clientId, accessToken: accessToken);
         return;
       }
     }
@@ -74,17 +153,55 @@ class ScripService {
 
     // Fall back to public full-master CSV if auth endpoint failed
     if (downloaded.isEmpty) {
-      downloaded = await _downloadAndParse();
+      downloaded = await _downloadAndParseEquity();
     }
 
     if (downloaded.isNotEmpty) {
       _scrips = downloaded;
-      await _saveToFile(downloaded);
+      await _saveToFile(downloaded, _cacheFile);
       await prefs.setString(_cacheKey, today);
     } else if (_scrips.isEmpty) {
       // Last resort: use stale cache
-      final cached = await _loadFromFile();
+      final cached = await _loadFromFile(_cacheFile);
       if (cached != null) _scrips = cached;
+    }
+
+    // Load F&O
+    await _loadFnoScrips(clientId: clientId, accessToken: accessToken);
+  }
+
+  // ── Load F&O scrips ────────────────────────────────────────────────────
+  Future<void> _loadFnoScrips({String? clientId, String? accessToken}) async {
+    final prefs = await SharedPreferences.getInstance();
+    final cachedDate = prefs.getString(_fnoCacheKey) ?? '';
+    final today = _today();
+
+    if (cachedDate == today) {
+      final cached = await _loadFromFile(_fnoCacheFile);
+      if (cached != null && cached.isNotEmpty) {
+        _fnoScrips = cached;
+        return;
+      }
+    }
+
+    // Try authenticated NSE_FNO endpoint
+    List<ScripInfo> downloaded = [];
+    if (clientId != null && accessToken != null) {
+      downloaded = await _downloadNseFno(clientId, accessToken);
+    }
+
+    // Fallback: parse full master CSV for F&O
+    if (downloaded.isEmpty) {
+      downloaded = await _downloadAndParseFno();
+    }
+
+    if (downloaded.isNotEmpty) {
+      _fnoScrips = downloaded;
+      await _saveToFile(downloaded, _fnoCacheFile);
+      await prefs.setString(_fnoCacheKey, today);
+    } else if (_fnoScrips.isEmpty) {
+      final cached = await _loadFromFile(_fnoCacheFile);
+      if (cached != null) _fnoScrips = cached;
     }
   }
 
@@ -154,7 +271,6 @@ class ScripService {
   // NSE symbol → Dhan trading symbol mapping for known mismatches
   static const _symbolAliases = <String, String>{
     // Add mappings here as: 'NSE_SYMBOL': 'DHAN_SYMBOL'
-    // e.g. 'RELINFRA': 'RELIANCEINFRA',
   };
 
   Future<Set<String>> _fetchIndexCsv(String fileName) async {
@@ -174,7 +290,6 @@ class ScripService {
       for (int i = 1; i < lines.length; i++) { // skip header
         final line = lines[i].trim();
         if (line.isEmpty) continue;
-        // CSV columns: Company Name, Industry, Symbol, Series, ISIN
         final parts = line.split(',');
         if (parts.length >= 3) {
           final symbol = parts[2].trim().replaceAll('"', '');
@@ -190,7 +305,6 @@ class ScripService {
   }
 
   /// Returns security IDs for a given index universe.
-  /// Uses dynamically fetched constituents; falls back to hardcoded list.
   List<int> getSecurityIdsForUniverse(String universe) {
     Set<String> indexSymbols;
     switch (universe) {
@@ -204,7 +318,6 @@ class ScripService {
         indexSymbols = _nifty500Symbols.isNotEmpty ? _nifty500Symbols : Nifty500Stocks.symbols;
     }
 
-    // Build expanded set: original NSE symbols + Dhan aliases
     final expandedSymbols = <String>{...indexSymbols};
     for (final entry in _symbolAliases.entries) {
       if (indexSymbols.contains(entry.key)) {
@@ -216,7 +329,6 @@ class ScripService {
         .where((s) => expandedSymbols.contains(s.symbol.toUpperCase()))
         .toList();
 
-    // For Nifty 50 with hardcoded fallback, take first 50
     if (universe == 'Nifty 50' && _nifty50Symbols.isEmpty) {
       return matched.take(50).map((s) => s.securityId).toList();
     }
@@ -260,25 +372,108 @@ class ScripService {
         .toList();
   }
 
-  // ── Search from loaded scrips ────────────────────────────────────────
+  // ── Search ─────────────────────────────────────────────────────────────
+
+  /// Search equity only (backward compatible)
   List<ScripInfo> search(String query) {
+    return searchWithFilter(query, segment: ScripSegment.equity);
+  }
+
+  /// Search with optional segment filter
+  List<ScripInfo> searchWithFilter(String query, {ScripSegment? segment}) {
     final q = query.toLowerCase().trim();
-    if (q.isEmpty) return _scrips.take(50).toList();
-    return _scrips
-        .where((s) =>
-            s.symbol.toLowerCase().contains(q) ||
-            s.name.toLowerCase().contains(q))
-        .take(50)
-        .toList();
+
+    List<ScripInfo> source;
+    switch (segment) {
+      case ScripSegment.equity:
+        source = _scrips;
+        break;
+      case ScripSegment.futures:
+        source = _fnoScrips
+            .where((s) => s.segment == ScripSegment.futures && !s.isExpired)
+            .toList();
+        break;
+      case ScripSegment.options:
+        // Only show current + next month options to keep results manageable
+        final now = DateTime.now();
+        final cutoff = DateTime(now.year, now.month + 2, 1);
+        source = _fnoScrips
+            .where((s) =>
+                s.segment == ScripSegment.options &&
+                !s.isExpired &&
+                (s.expiryDate == null || s.expiryDate!.isBefore(cutoff)))
+            .toList();
+        break;
+      case null:
+        // All segments: equity + non-expired F&O
+        source = [
+          ..._scrips,
+          ..._fnoScrips.where((s) => !s.isExpired),
+        ];
+        break;
+    }
+
+    if (q.isEmpty) return source.take(50).toList();
+
+    // Build underlying→equity name lookup for F&O matching
+    // e.g., "TATAMOTORS" → "TATA MOTORS LTD" so searching "tata motors"
+    // also finds TATAMOTORS futures/options
+    final equityNameMap = <String, String>{};
+    if (segment != ScripSegment.equity) {
+      for (final s in _scrips) {
+        equityNameMap[s.symbol.toUpperCase()] = s.name.toLowerCase();
+      }
+    }
+
+    bool matches(ScripInfo s) {
+      if (s.symbol.toLowerCase().contains(q)) return true;
+      if (s.name.toLowerCase().contains(q)) return true;
+      if (s.displayName.toLowerCase().contains(q)) return true;
+      // For F&O: also match by underlying equity stock name
+      if (s.segment != ScripSegment.equity) {
+        final equityName = equityNameMap[s.underlying.toUpperCase()];
+        if (equityName != null && equityName.contains(q)) return true;
+      }
+      return false;
+    }
+
+    // When showing all segments, collect per-segment to ensure each is represented
+    if (segment == null) {
+      final eqResults = <ScripInfo>[];
+      final futResults = <ScripInfo>[];
+      final optResults = <ScripInfo>[];
+      for (final s in source) {
+        if (!matches(s)) continue;
+        switch (s.segment) {
+          case ScripSegment.equity:
+            if (eqResults.length < 20) eqResults.add(s);
+            break;
+          case ScripSegment.futures:
+            if (futResults.length < 10) futResults.add(s);
+            break;
+          case ScripSegment.options:
+            if (optResults.length < 20) optResults.add(s);
+            break;
+        }
+        if (eqResults.length + futResults.length + optResults.length >= 50) break;
+      }
+      return [...eqResults, ...futResults, ...optResults];
+    }
+
+    return source.where(matches).take(50).toList();
   }
 
   // ── Resolve security IDs → ScripInfo ────────────────────────────────
   ScripInfo? findById(int securityId) {
-    try {
-      return _scrips.firstWhere((s) => s.securityId == securityId);
-    } catch (_) {
-      return null;
+    // Try equity first (most common)
+    for (final s in _scrips) {
+      if (s.securityId == securityId) return s;
     }
+    // Then F&O
+    for (final s in _fnoScrips) {
+      if (s.securityId == securityId) return s;
+    }
+    return null;
   }
 
   // ── Download NSE_EQ only via authenticated API (primary) ─────────────
@@ -294,26 +489,62 @@ class ScripService {
         },
       ).timeout(const Duration(seconds: 15));
       if (response.statusCode != 200) return [];
-      return _parseCsv(response.body); // same CSV format, already NSE_EQ
+      return _parseEquityCsv(response.body);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  // ── Download NSE_FNO via authenticated API ────────────────────────────
+  Future<List<ScripInfo>> _downloadNseFno(
+      String clientId, String accessToken) async {
+    try {
+      final response = await http.get(
+        Uri.parse(_nseFnoUrl),
+        headers: {
+          'access-token': accessToken,
+          'client-id': clientId,
+          'Accept': 'text/csv',
+        },
+      ).timeout(const Duration(seconds: 30));
+      if (response.statusCode != 200) return [];
+      return _parseFnoCsv(response.body);
     } catch (_) {
       return [];
     }
   }
 
   // ── Download full master CSV (fallback, no auth needed) ──────────────
-  Future<List<ScripInfo>> _downloadAndParse() async {
+  Future<List<ScripInfo>> _downloadAndParseEquity() async {
     try {
       final response = await http
           .get(Uri.parse(_fallbackUrl))
           .timeout(const Duration(seconds: 30));
       if (response.statusCode != 200) return [];
-      return _parseCsv(response.body);
+      return _parseEquityCsv(response.body);
     } catch (_) {
       return [];
     }
   }
 
-  List<ScripInfo> _parseCsv(String csv) {
+  Future<List<ScripInfo>> _downloadAndParseFno() async {
+    try {
+      final response = await http
+          .get(Uri.parse(_fallbackUrl))
+          .timeout(const Duration(seconds: 60));
+      if (response.statusCode != 200) return [];
+      return _parseFnoCsv(response.body);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  // ── CSV parsers ────────────────────────────────────────────────────────
+
+  /// Parse equity instruments from Dhan CSV
+  /// Columns: 0=Exchange, 1=Segment(E), 2=SecurityId, 3=InstrumentName,
+  ///          5=TradingSymbol, 14=Series, 15=SymbolName
+  List<ScripInfo> _parseEquityCsv(String csv) {
     final lines = csv.split('\n');
     final scrips = <ScripInfo>[];
 
@@ -324,7 +555,6 @@ class ScripService {
       final cols = line.split(',');
       if (cols.length < 16) continue;
 
-      // Only NSE equity stocks with EQ series
       if (cols[0].trim() != 'NSE') continue;
       if (cols[1].trim() != 'E') continue;
       if (cols[3].trim() != 'EQUITY') continue;
@@ -337,29 +567,130 @@ class ScripService {
       final name = cols[15].trim();
       if (symbol.isEmpty) continue;
 
-      scrips.add(ScripInfo(symbol: symbol, name: name, securityId: securityId));
+      scrips.add(ScripInfo(
+        symbol: symbol,
+        name: name,
+        securityId: securityId,
+        segment: ScripSegment.equity,
+        exchangeSegment: 'NSE_EQ',
+        instrumentType: 'EQUITY',
+      ));
+    }
+
+    return scrips;
+  }
+
+  /// Parse F&O instruments from Dhan CSV
+  /// Columns: 0=Exchange, 1=Segment(D), 2=SecurityId, 3=InstrumentName,
+  ///          5=TradingSymbol, 6=LotSize, 7=CustomSymbol,
+  ///          8=ExpiryDate, 9=StrikePrice, 10=OptionType,
+  ///          13=ExchInstrumentType, 15=SymbolName
+  List<ScripInfo> _parseFnoCsv(String csv) {
+    final lines = csv.split('\n');
+    final scrips = <ScripInfo>[];
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+
+    for (int i = 1; i < lines.length; i++) {
+      final line = lines[i].trim();
+      if (line.isEmpty) continue;
+
+      final cols = line.split(',');
+      if (cols.length < 16) continue;
+
+      // Only NSE derivatives
+      if (cols[0].trim() != 'NSE') continue;
+      if (cols[1].trim() != 'D') continue;
+
+      final instrType = cols[3].trim();
+      // Only futures and options (skip test instruments)
+      if (!{'FUTIDX', 'FUTSTK', 'OPTIDX', 'OPTSTK'}.contains(instrType)) continue;
+
+      final securityId = int.tryParse(cols[2].trim());
+      if (securityId == null) continue;
+
+      final symbol = cols[5].trim();
+      if (symbol.isEmpty) continue;
+
+      // Skip test instruments
+      if (symbol.contains('NSETEST')) continue;
+
+      // Parse expiry date
+      final expiryStr = cols[8].trim();
+      DateTime? expiryDate;
+      if (expiryStr.isNotEmpty) {
+        expiryDate = DateTime.tryParse(expiryStr);
+      }
+
+      // Skip expired instruments
+      if (expiryDate != null && expiryDate.isBefore(today)) continue;
+
+      // Parse strike price
+      final strikeStr = cols[9].trim();
+      double? strikePrice;
+      if (strikeStr.isNotEmpty) {
+        strikePrice = double.tryParse(strikeStr);
+        if (strikePrice != null && strikePrice <= 0) strikePrice = null;
+      }
+
+      // Parse option type
+      String? optionType;
+      final optTypeStr = cols[10].trim();
+      if (optTypeStr == 'CE' || optTypeStr == 'PE') {
+        optionType = optTypeStr;
+      }
+
+      // Parse lot size
+      final lotStr = cols[6].trim();
+      final lotSize = double.tryParse(lotStr);
+
+      // Determine segment
+      final segment = (instrType == 'FUTIDX' || instrType == 'FUTSTK')
+          ? ScripSegment.futures
+          : ScripSegment.options;
+
+      // Use custom symbol as name (more readable), fallback to symbol name
+      final customSymbol = cols[7].trim();
+      final name = customSymbol.isNotEmpty ? customSymbol : (cols[15].trim());
+
+      // cols[15] = SymbolName = underlying equity symbol (e.g. "TATAMOTORS")
+      final symbolName = cols[15].trim();
+
+      scrips.add(ScripInfo(
+        symbol: symbol,
+        name: name,
+        securityId: securityId,
+        segment: segment,
+        exchangeSegment: 'NSE_FNO',
+        instrumentType: instrType,
+        expiryDate: expiryDate,
+        strikePrice: strikePrice,
+        optionType: optionType,
+        lotSize: lotSize,
+        underlyingSymbol: symbolName.isNotEmpty ? symbolName : null,
+      ));
     }
 
     return scrips;
   }
 
   // ── File cache ───────────────────────────────────────────────────────
-  Future<File> _getCacheFile() async {
+  Future<File> _getCacheFile(String fileName) async {
     final dir = await getApplicationDocumentsDirectory();
-    return File('${dir.path}/$_cacheFile');
+    return File('${dir.path}/$fileName');
   }
 
-  Future<void> _saveToFile(List<ScripInfo> scrips) async {
+  Future<void> _saveToFile(List<ScripInfo> scrips, String fileName) async {
     try {
-      final file = await _getCacheFile();
+      final file = await _getCacheFile(fileName);
       await file.writeAsString(
           jsonEncode(scrips.map((s) => s.toJson()).toList()));
     } catch (_) {}
   }
 
-  Future<List<ScripInfo>?> _loadFromFile() async {
+  Future<List<ScripInfo>?> _loadFromFile(String fileName) async {
     try {
-      final file = await _getCacheFile();
+      final file = await _getCacheFile(fileName);
       if (!await file.exists()) return null;
       final content = await file.readAsString();
       final list = jsonDecode(content) as List<dynamic>;

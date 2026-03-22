@@ -42,11 +42,18 @@ A Flutter mobile app for **live stock prices**, **candlestick charts**, and **au
 - Double-tap to **rename** a watchlist
 - Swipe to **delete** a watchlist
 
-### Stock Search
-- Downloads Dhan's **NSE_EQ instrument list** via authenticated API on first launch
+### Stock Search (Equity + F&O)
+- Downloads Dhan's **NSE_EQ** and **NSE_FNO** instrument lists via authenticated API on first launch
+- **~105K F&O instruments** (futures + options) filtered to non-expired at parse time
 - Cached locally — re-downloads **once per day** automatically
 - Falls back to full public scrip master CSV if auth endpoint fails
-- Search by symbol (e.g. `HDFC`) or company name (e.g. `Infosys`)
+- Search by symbol (e.g. `HDFC`) or company name (e.g. `Tata Motors`)
+- **F&O search by company name** — searching "tata motors" finds TATAMOTORS futures and options via underlying equity name lookup
+- **Filter chips**: All / Equity / Futures / Options — quick segment filtering
+- **Segment badges**: Color-coded tags (blue=Equity, orange=FUT, purple=CE/PE) on search results
+- **Balanced results in All tab**: Shows equity + futures + options together (capped per segment to prevent one segment dominating)
+- Options filtered to current + next month expiry to keep results manageable
+- Shows lot size for F&O instruments in search results
 - **Search bar on home screen** — tap to search and add stocks directly to the active watchlist
 - Duplicate and full-watchlist (20 stocks) guards with snackbar feedback
 
@@ -289,7 +296,7 @@ lib/
 │   ├── dhan_service.dart                  # Dhan REST API calls (OHLC, charts, holdings, funds)
 │   ├── dhan_feed_service.dart             # Dhan WebSocket binary feed (live prices)
 │   ├── rate_limiter.dart                  # Centralized API rate limiter (singleton)
-│   ├── scrip_service.dart                 # Scrip master + dynamic NSE index fetching (singleton)
+│   ├── scrip_service.dart                 # Scrip master (equity + F&O) + dynamic NSE index fetching (singleton)
 │   ├── candle_repository.dart             # Historical candle download with caching and progress
 │   ├── storage_service.dart               # SharedPreferences: credentials, watchlists, theme, configs, trades, active strategy
 │   ├── app_logger.dart                    # File-based logger with memory buffer
@@ -328,6 +335,7 @@ lib/
 |---|---|
 | `wss://api-feed.dhan.co` | WebSocket live feed (LTP, OHLC, prevClose) |
 | `GET /v2/instrument/NSE_EQ` | NSE equity instrument list (auth, small) |
+| `GET /v2/instrument/NSE_FNO` | NSE F&O instrument list (auth, ~105K instruments) |
 | `POST /v2/marketfeed/ohlc` | Initial LTP + OHLC (REST, startup only) |
 | `POST /v2/charts/intraday` | Intraday candlestick data (5m / 15m) |
 | `POST /v2/charts/historical` | Previous day's close (startup, per watchlist) |
@@ -378,7 +386,7 @@ Init logger + background service
   ↓
 Load saved credentials + watchlists + theme
   ↓
-Download NSE_EQ instrument list (or load from cache)
+Download NSE_EQ + NSE_FNO instrument lists (or load from cache)
   ↓
 Fetch yesterday's close for each watchlist stock
   ↓
@@ -394,6 +402,7 @@ Connection: wss://api-feed.dhan.co?version=2&token=...&clientId=...&authType=2
 Subscribe (JSON):
   { "RequestCode": 15, "InstrumentCount": N,
     "InstrumentList": [{"ExchangeSegment": "NSE_EQ", "SecurityId": "1333"}] }
+  (ExchangeSegment resolved per instrument: NSE_EQ for equity, NSE_FNO for F&O)
 
 Binary packets (little-endian, 8-byte header):
   Header: [code:u8][msgLen:u16][exchange:u8][securityId:i32]
@@ -509,6 +518,9 @@ Screening window ends → auto-stop → show results
 ### 19. Only ~410 Stocks Instead of 500
 **Problem:** Hardcoded `nifty500_stocks.dart` was incomplete and many symbols didn't match Dhan's scrip master. **Fix:** Dynamic fetching from official NSE website (niftyindices.com), cached daily, with hardcoded fallback.
 
+### 20. F&O Not Showing in "All" Search Tab
+**Problem:** Searching "tata motors" in the All tab showed only equity, not F&O — even though F&O appeared in Futures/Options tabs individually. **Two causes:** (1) `underlying` getter relied on dash-parsing of TradingSymbol, but Dhan F&O symbols may not have dashes → equity name lookup failed. Fixed by storing explicit `underlyingSymbol` from CSV SymbolName column. (2) `.take(50)` filled by options (48) + equity (2) before futures appeared. Fixed by balanced per-segment collection (20 eq, 10 fut, 20 opt).
+
 ---
 
 ## Build Phases
@@ -549,6 +561,8 @@ Screening window ends → auto-stop → show results
 - Immediate breakout detection in live engine (catches breakouts during screening delay)
 - Active strategy tracking to fix false running state on app restart
 - Comparison logging for live vs backtest debugging
+- F&O instrument search with filter chips (All/Equity/Futures/Options)
+- Segment-aware API calls and WebSocket subscriptions (NSE_EQ / NSE_FNO)
 
 ### Phase 5 (Next)
 - Live trading via Dhan Order API

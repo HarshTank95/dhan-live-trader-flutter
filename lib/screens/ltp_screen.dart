@@ -1347,11 +1347,12 @@ class _LtpScreenState extends State<LtpScreen> {
 
 class _StockSearchDelegate extends SearchDelegate<ScripInfo?> {
   final ScripService scripService;
+  final ValueNotifier<ScripSegment?> _segmentFilter = ValueNotifier(null);
 
   _StockSearchDelegate(this.scripService);
 
   @override
-  String get searchFieldLabel => 'Search stocks...';
+  String get searchFieldLabel => 'Search stocks & F&O...';
 
   @override
   List<Widget> buildActions(BuildContext context) => [
@@ -1375,7 +1376,48 @@ class _StockSearchDelegate extends SearchDelegate<ScripInfo?> {
   Widget buildSuggestions(BuildContext context) => _buildList(context);
 
   Widget _buildList(BuildContext context) {
-    final results = scripService.search(query);
+    return ValueListenableBuilder<ScripSegment?>(
+      valueListenable: _segmentFilter,
+      builder: (context, segment, _) {
+        final results = scripService.searchWithFilter(query, segment: segment);
+        return Column(
+          children: [
+            _buildFilterChips(segment),
+            Expanded(child: _buildResultsList(context, results)),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildFilterChips(ScripSegment? active) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Row(
+        children: [
+          _chip('All', null, active),
+          const SizedBox(width: 6),
+          _chip('Equity', ScripSegment.equity, active),
+          const SizedBox(width: 6),
+          _chip('Futures', ScripSegment.futures, active),
+          const SizedBox(width: 6),
+          _chip('Options', ScripSegment.options, active),
+        ],
+      ),
+    );
+  }
+
+  Widget _chip(String label, ScripSegment? value, ScripSegment? active) {
+    final selected = active == value;
+    return ChoiceChip(
+      label: Text(label, style: const TextStyle(fontSize: 12)),
+      selected: selected,
+      onSelected: (_) => _segmentFilter.value = value,
+      visualDensity: VisualDensity.compact,
+    );
+  }
+
+  Widget _buildResultsList(BuildContext context, List<ScripInfo> results) {
     if (results.isEmpty) {
       return Center(
         child: Column(
@@ -1384,7 +1426,7 @@ class _StockSearchDelegate extends SearchDelegate<ScripInfo?> {
             Icon(Icons.search_off, size: 48, color: Colors.grey.shade400),
             const SizedBox(height: 12),
             Text(
-              query.isEmpty ? 'Type to search stocks' : 'No stocks found for "$query"',
+              query.isEmpty ? 'Type to search stocks & F&O' : 'No results for "$query"',
               style: const TextStyle(color: Colors.grey),
             ),
           ],
@@ -1397,22 +1439,72 @@ class _StockSearchDelegate extends SearchDelegate<ScripInfo?> {
         final scrip = results[index];
         return ListTile(
           leading: CircleAvatar(
-            backgroundColor: Colors.blue.shade50,
+            backgroundColor: _segmentColor(scrip.segment).withValues(alpha: 0.15),
             child: Text(
-              scrip.symbol[0],
-              style: const TextStyle(
-                  color: Colors.blue, fontWeight: FontWeight.bold),
+              scrip.underlying[0],
+              style: TextStyle(
+                  color: _segmentColor(scrip.segment),
+                  fontWeight: FontWeight.bold),
             ),
           ),
-          title: Text(scrip.symbol,
-              style: const TextStyle(fontWeight: FontWeight.bold)),
-          subtitle: Text(scrip.name,
-              style: const TextStyle(fontSize: 12),
-              overflow: TextOverflow.ellipsis),
+          title: Row(
+            children: [
+              Flexible(
+                child: Text(
+                  scrip.segment == ScripSegment.equity
+                      ? scrip.symbol
+                      : scrip.displayName,
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 6),
+              _segmentBadge(scrip),
+            ],
+          ),
+          subtitle: Text(
+            scrip.segment == ScripSegment.equity
+                ? scrip.name
+                : 'Lot: ${scrip.lotSize?.toInt() ?? '?'}',
+            style: const TextStyle(fontSize: 12),
+            overflow: TextOverflow.ellipsis,
+          ),
           trailing: const Icon(Icons.add_circle_outline, color: Colors.blue),
           onTap: () => close(context, scrip),
         );
       },
+    );
+  }
+
+  Color _segmentColor(ScripSegment segment) {
+    switch (segment) {
+      case ScripSegment.equity:
+        return Colors.blue;
+      case ScripSegment.futures:
+        return Colors.orange;
+      case ScripSegment.options:
+        return Colors.purple;
+    }
+  }
+
+  Widget _segmentBadge(ScripInfo scrip) {
+    if (scrip.segment == ScripSegment.equity) return const SizedBox.shrink();
+
+    final label = scrip.segment == ScripSegment.futures
+        ? 'FUT'
+        : scrip.optionType ?? 'OPT';
+    final color = _segmentColor(scrip.segment);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: color),
+      ),
     );
   }
 }

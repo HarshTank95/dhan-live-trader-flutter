@@ -61,6 +61,32 @@ class DhanService {
     _watchlist = scrips;
   }
 
+  /// Group security IDs by exchange segment (from watchlist)
+  Map<String, List<int>> _groupBySegment(List<int> securityIds) {
+    final grouped = <String, List<int>>{};
+    for (final id in securityIds) {
+      final scrip = _watchlist.firstWhere(
+        (s) => s.securityId == id,
+        orElse: () => ScripInfo(symbol: '', name: '', securityId: id),
+      );
+      final seg = scrip.exchangeSegment;
+      (grouped[seg] ??= []).add(id);
+    }
+    return grouped;
+  }
+
+  /// Group security IDs by exchange segment (from ScripService)
+  Map<String, List<int>> _groupBySegmentFromIds(List<int> ids) {
+    final grouped = <String, List<int>>{};
+    final scripService = ScripService();
+    for (final id in ids) {
+      final scrip = scripService.findById(id);
+      final seg = scrip?.exchangeSegment ?? 'NSE_EQ';
+      (grouped[seg] ??= []).add(id);
+    }
+    return grouped;
+  }
+
   // ── Load yesterday's close once at startup ───────────────────────────
   Future<void> loadPrevCloses() async {
     if (_watchlist.isEmpty) return;
@@ -98,7 +124,7 @@ class DhanService {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
         },
-        body: jsonEncode({'NSE_EQ': securityIds}),
+        body: jsonEncode(_groupBySegment(securityIds)),
       );
     } catch (e) {
       throw DhanNetworkException('No internet connection or server unreachable');
@@ -115,10 +141,15 @@ class DhanService {
     }
 
     final json = jsonDecode(response.body);
-    final nseData = json['data']['NSE_EQ'] as Map<String, dynamic>;
+    final allData = <String, dynamic>{};
+    // Merge data from all segments
+    for (final seg in ['NSE_EQ', 'NSE_FNO']) {
+      final segData = json['data']?[seg] as Map<String, dynamic>?;
+      if (segData != null) allData.addAll(segData);
+    }
 
     return _watchlist.map((stock) {
-      final data = nseData[stock.securityId.toString()];
+      final data = allData[stock.securityId.toString()];
       final ohlc = data?['ohlc'] ?? {};
 
       return StockQuote(
@@ -135,11 +166,32 @@ class DhanService {
   }
 
   // ── Historical daily close ───────────────────────────────────────────
+  /// Resolve exchange segment for a security ID
+  String _resolveSegment(int secId) {
+    final scrip = ScripService().findById(secId);
+    return scrip?.exchangeSegment ?? 'NSE_EQ';
+  }
+
+  /// Resolve instrument type for API calls
+  String _resolveInstrument(int secId) {
+    final scrip = ScripService().findById(secId);
+    if (scrip == null) return 'EQUITY';
+    switch (scrip.segment) {
+      case ScripSegment.futures:
+        return scrip.instrumentType ?? 'FUTIDX';
+      case ScripSegment.options:
+        return scrip.instrumentType ?? 'OPTIDX';
+      default:
+        return 'EQUITY';
+    }
+  }
+
   Future<double> _fetchDayClose(
       String securityId, String fromDate, String toDate) async {
     // Watchman: enforce Data API rate limit (5 req/sec, 100k/day)
     await RateLimiter.instance.acquire(ApiCategory.data);
 
+    final secId = int.tryParse(securityId) ?? 0;
     final response = await http.post(
       Uri.parse('$_baseUrl/v2/charts/historical'),
       headers: {
@@ -150,8 +202,8 @@ class DhanService {
       },
       body: jsonEncode({
         'securityId': securityId,
-        'exchangeSegment': 'NSE_EQ',
-        'instrument': 'EQUITY',
+        'exchangeSegment': _resolveSegment(secId),
+        'instrument': _resolveInstrument(secId),
         'expiryCode': 0,
         'oi': false,
         'fromDate': fromDate,
@@ -185,8 +237,8 @@ class DhanService {
         },
         body: jsonEncode({
           'securityId': securityId.toString(),
-          'exchangeSegment': 'NSE_EQ',
-          'instrument': 'EQUITY',
+          'exchangeSegment': _resolveSegment(securityId),
+          'instrument': _resolveInstrument(securityId),
           'interval': interval,
           'fromDate': dateStr,
           'toDate': dateStr,
@@ -231,8 +283,8 @@ class DhanService {
         },
         body: jsonEncode({
           'securityId': securityId.toString(),
-          'exchangeSegment': 'NSE_EQ',
-          'instrument': 'EQUITY',
+          'exchangeSegment': _resolveSegment(securityId),
+          'instrument': _resolveInstrument(securityId),
           'expiryCode': 0,
           'oi': false,
           'fromDate': _fmt(fromDate),
@@ -383,7 +435,7 @@ class DhanService {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
         },
-        body: jsonEncode({'NSE_EQ': ids}),
+        body: jsonEncode(_groupBySegmentFromIds(ids)),
       );
     } catch (e) {
       throw DhanNetworkException('No internet connection or server unreachable');
@@ -395,10 +447,14 @@ class DhanService {
     if (response.statusCode != 200) return {};
 
     final json = jsonDecode(response.body) as Map<String, dynamic>;
-    final nseData = json['data']?['NSE_EQ'] as Map<String, dynamic>? ?? {};
+    final allData = <String, dynamic>{};
+    for (final seg in ['NSE_EQ', 'NSE_FNO']) {
+      final segData = json['data']?[seg] as Map<String, dynamic>?;
+      if (segData != null) allData.addAll(segData);
+    }
 
     return {
-      for (final entry in nseData.entries)
+      for (final entry in allData.entries)
         if (int.tryParse(entry.key) != null)
           int.parse(entry.key):
               (entry.value['last_price'] as num?)?.toDouble() ?? 0,

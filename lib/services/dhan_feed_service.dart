@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'scrip_service.dart';
 
 // ── Data model emitted by the feed ──────────────────────────────────────────
 
@@ -146,13 +147,20 @@ class DhanFeedService {
 
   void _subscribe(List<int> ids) {
     if (ids.isEmpty) return;
+    final scripService = ScripService();
     for (var i = 0; i < ids.length; i += 100) {
       final batch = ids.sublist(i, (i + 100).clamp(0, ids.length));
       _channel?.sink.add(jsonEncode({
         'RequestCode': 15,
         'InstrumentCount': batch.length,
         'InstrumentList': batch
-            .map((id) => {'ExchangeSegment': 'NSE_EQ', 'SecurityId': id.toString()})
+            .map((id) {
+              final scrip = scripService.findById(id);
+              return {
+                'ExchangeSegment': scrip?.exchangeSegment ?? 'NSE_EQ',
+                'SecurityId': id.toString(),
+              };
+            })
             .toList(),
       }));
     }
