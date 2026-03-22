@@ -242,6 +242,49 @@ Live logs tagged as `[INFO] Engine:`, backtest as `[INFO] Backtest:` — both vi
 
 ---
 
+## Paper Trading
+
+Virtual trading system with ₹10,00,000 starting capital — practice trading without real money.
+
+### Features
+- **Buy & Short Sell** — go long or short on any stock from the watchlist
+- **Professional Order Sheet** — half-screen bottom sheet with Market/Limit order types, Intraday mode
+- **Swipe to Confirm** — premium swipe-to-confirm widget with gradient track, animated shimmer, pulsing glow, and haptic feedback
+- **Live LTP in Order** — own WebSocket connection for real-time price updates while placing orders
+- **Partial Sell** — sell a portion of your position, average price preserved
+- **Short Selling** — sell without holding, cover later with BUY order
+- **Positions Screen** — centered available balance, invested/unrealised/realised stats, sorted by P&L
+- **Day P&L Card** — today's realised P&L with win/loss count
+- **Trade History** — full entry→exit price, P&L, timestamp for every closed trade
+- **Reset Portfolio** — clear all positions and history, reset to ₹10,00,000
+- **Persistent** — positions, trades, and balance saved via SharedPreferences
+
+### Order Flow
+```
+Watchlist → Tap stock → BUY/SELL buttons
+  ↓
+Half-screen order sheet opens (green=buy, red=sell)
+  ↓
+Select Market/Limit → Enter quantity (+ price for Limit)
+  ↓
+Swipe to confirm → Haptic feedback → Sheet closes
+  ↓
+Floating snackbar: "SYMBOL Buy order placed | 1 x ₹780.50"
+```
+
+### Short Selling Flow
+```
+SELL without position → Short position created (margin deducted)
+  ↓
+Positions screen shows SHORT tag + COVER button
+  ↓
+Tap COVER → BUY order sheet opens
+  ↓
+Swipe to confirm → Margin returned + P&L settled
+```
+
+---
+
 ## App Logging
 
 File-based logger for debugging on device.
@@ -274,7 +317,9 @@ lib/
 │   ├── strategy_config_model.dart         # Strategy config: type, params, stocks, paper/live, enabled
 │   ├── strategy_signal_model.dart         # Dominance candle signal with metrics
 │   ├── strategy_trade_model.dart          # Trade with entry/exit, SL/target, P&L computed fields
-│   └── daily_run_summary_model.dart       # Daily run history: stats, events, P&L
+│   ├── daily_run_summary_model.dart       # Daily run history: stats, events, P&L
+│   ├── paper_position_model.dart          # Paper trading position with long/short support
+│   └── paper_trade_model.dart             # Paper trading closed trade with P&L
 │
 ├── screens/
 │   ├── token_entry_screen.dart            # Credential input screen
@@ -290,7 +335,9 @@ lib/
 │   ├── backtest_config_screen.dart        # Backtest setup: date range, universe, params, API estimate
 │   ├── backtest_progress_screen.dart      # Backtest download progress with cancel support
 │   ├── backtest_results_screen.dart       # Backtest results: summary, daily chart, trades with entry/exit times
-│   └── log_viewer_screen.dart             # On-device log viewer with filter, copy, and share/export
+│   ├── log_viewer_screen.dart             # On-device log viewer with filter, copy, and share/export
+│   ├── paper_order_screen.dart            # Paper trading order bottom sheet (Market/Limit, swipe confirm)
+│   └── paper_positions_screen.dart        # Paper positions, day P&L, trade history
 │
 ├── services/
 │   ├── dhan_service.dart                  # Dhan REST API calls (OHLC, charts, holdings, funds)
@@ -302,7 +349,11 @@ lib/
 │   ├── app_logger.dart                    # File-based logger with memory buffer
 │   ├── strategy_background_service.dart   # Android foreground service for background strategy execution
 │   ├── strategy_engine.dart               # Live strategy execution engine (runs in background isolate)
-│   └── backtest_engine.dart               # Backtest simulation engine (same rules as live)
+│   ├── backtest_engine.dart               # Backtest simulation engine (same rules as live)
+│   └── paper_trading_service.dart         # Paper trading: buy, sell, short, partial close, persistence
+│
+├── widgets/
+│   └── swipe_confirm_widget.dart          # Swipe-to-confirm slider with shimmer + haptic
 │
 └── strategies/
     ├── base_strategy.dart                 # Abstract strategy interface + StrategyParamDef
@@ -564,12 +615,20 @@ Screening window ends → auto-stop → show results
 - F&O instrument search with filter chips (All/Equity/Futures/Options)
 - Segment-aware API calls and WebSocket subscriptions (NSE_EQ / NSE_FNO)
 
-### Phase 5 (Next)
+### Phase 5 (Complete)
+- Paper Trading system with virtual ₹10,00,000 portfolio
+- Professional order placement bottom sheet (replaces AlertDialogs)
+- Swipe-to-confirm widget with haptic feedback and animations
+- Short selling support with COVER flow
+- Premium positions screen with day P&L tracking
+- Trade history with full entry/exit details
+
+### Phase 6 (Next)
 - Live trading via Dhan Order API
 - Order placement, confirmation, and monitoring
 - End-of-day auto-square-off
 
-### Phase 6
+### Phase 7
 - Auto-schedule (start strategy at fixed time daily)
 - Trade history and analytics
 - Multiple concurrent strategies

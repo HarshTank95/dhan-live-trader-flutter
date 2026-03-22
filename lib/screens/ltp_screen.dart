@@ -6,10 +6,13 @@ import '../services/dhan_feed_service.dart';
 import '../services/dhan_service.dart'
     show DhanService, DhanAuthException, DhanRateLimitException, DhanNetworkException, StockQuote;
 import '../services/scrip_service.dart';
+import '../services/paper_trading_service.dart';
 import '../services/storage_service.dart';
 import 'chart_screen.dart';
 import 'holdings_screen.dart';
 import 'log_viewer_screen.dart';
+import 'paper_order_screen.dart';
+import 'paper_positions_screen.dart';
 import 'strategy_list_screen.dart';
 import 'token_entry_screen.dart';
 import 'watchlist_manager_screen.dart';
@@ -55,6 +58,10 @@ class _LtpScreenState extends State<LtpScreen> {
   Map<String, double>? _funds;
   bool _fundsLoading = false;
 
+  // Paper trading
+  final PaperTradingService _paperService = PaperTradingService();
+  String _tradingMode = 'paper'; // 'paper' or 'live'
+
   WatchlistModel? get _activeWatchlist {
     try {
       return _watchlists.firstWhere((w) => w.id == _activeWatchlistId);
@@ -86,6 +93,9 @@ class _LtpScreenState extends State<LtpScreen> {
     );
     // Load Nifty index constituents from NSE (cached daily)
     await _scripService.loadIndexConstituents();
+    // Init paper trading
+    await _paperService.init();
+    _tradingMode = await StorageService.loadTradingMode();
     setState(() => _isLoadingScrips = false);
 
     // Step 3: Apply active watchlist
@@ -380,6 +390,21 @@ class _LtpScreenState extends State<LtpScreen> {
     );
   }
 
+  void _openPaperPositions() {
+    Navigator.pop(context); // close drawer
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => PaperPositionsScreen(
+          clientId: widget.clientId,
+          accessToken: widget.accessToken,
+        ),
+      ),
+    ).then((_) {
+      if (mounted) setState(() {}); // refresh after returning
+    });
+  }
+
   void _showStockDetail(StockQuote q) {
     final color = q.isPositive ? Colors.green : Colors.red;
     final arrow = q.isPositive ? '▲' : '▼';
@@ -472,6 +497,75 @@ class _LtpScreenState extends State<LtpScreen> {
               ],
             ),
             const SizedBox(height: 16),
+            // Buy / Sell buttons (Paper mode only for now)
+            if (_tradingMode == 'paper') ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12)),
+                      ),
+                      onPressed: () {
+                        Navigator.pop(context);
+                        _openOrderScreen(q, isBuy: true);
+                      },
+                      child: const Text('BUY',
+                          style: TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.w700)),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12)),
+                      ),
+                      onPressed: () {
+                        Navigator.pop(context);
+                        _openOrderScreen(q, isBuy: false);
+                      },
+                      child: const Text('SELL',
+                          style: TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.w700)),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ] else if (_tradingMode == 'live') ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.grey.shade400,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12)),
+                      ),
+                      onPressed: () {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Live trading coming soon!')),
+                        );
+                      },
+                      child: const Text('BUY / SELL  —  Coming Soon',
+                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
@@ -497,6 +591,22 @@ class _LtpScreenState extends State<LtpScreen> {
         ),
       ),
     );
+  }
+
+  void _openOrderScreen(StockQuote q, {required bool isBuy}) {
+    showPaperOrderSheet(
+      context: context,
+      isBuy: isBuy,
+      securityId: q.securityId,
+      symbol: q.symbol,
+      name: q.name,
+      ltp: q.ltp,
+      prevClose: q.prevClose,
+      clientId: widget.clientId,
+      accessToken: widget.accessToken,
+    ).then((placed) {
+      if (placed == true && mounted) setState(() {});
+    });
   }
 
   void _openChart(StockQuote q) {
@@ -573,6 +683,79 @@ class _LtpScreenState extends State<LtpScreen> {
         title: Text(activeWl?.name ?? 'Live Prices'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
+          // Paper/Live toggle
+          GestureDetector(
+            onTap: () async {
+              if (_tradingMode == 'paper') {
+                // Switching to Live — show warning
+                final confirmed = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    icon: const Icon(Icons.warning_amber_rounded,
+                        color: Colors.orange, size: 40),
+                    title: const Text('Switch to Live Mode?'),
+                    content: const Text(
+                      'In Live mode, orders will be placed using your real Dhan account with actual money.\n\n'
+                      'Make sure you understand the risks before proceeding.',
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, false),
+                        child: const Text('Stay on Paper'),
+                      ),
+                      FilledButton(
+                        style: FilledButton.styleFrom(
+                            backgroundColor: Colors.orange),
+                        onPressed: () => Navigator.pop(ctx, true),
+                        child: const Text('Switch to Live'),
+                      ),
+                    ],
+                  ),
+                );
+                if (confirmed != true) return;
+              }
+              setState(() {
+                _tradingMode = _tradingMode == 'paper' ? 'live' : 'paper';
+              });
+              StorageService.saveTradingMode(_tradingMode);
+            },
+            child: Container(
+              margin: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: _tradingMode == 'paper'
+                    ? Colors.teal.withOpacity(0.15)
+                    : Colors.orange.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: _tradingMode == 'paper' ? Colors.teal : Colors.orange,
+                  width: 1,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    _tradingMode == 'paper'
+                        ? Icons.description_outlined
+                        : Icons.bolt,
+                    size: 14,
+                    color: _tradingMode == 'paper' ? Colors.teal : Colors.orange,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    _tradingMode == 'paper' ? 'PAPER' : 'LIVE',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: _tradingMode == 'paper' ? Colors.teal : Colors.orange,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
           // Market badge
           Container(
             margin: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
@@ -962,6 +1145,12 @@ class _LtpScreenState extends State<LtpScreen> {
                   label: 'Holdings / Portfolio',
                   iconColor: const Color(0xFF6750A4),
                   onTap: _openHoldings,
+                ),
+                _drawerTile(
+                  icon: Icons.receipt_long_outlined,
+                  label: 'Paper Trading',
+                  iconColor: Colors.teal,
+                  onTap: _openPaperPositions,
                 ),
                 _drawerTile(
                   icon: Icons.manage_accounts_outlined,

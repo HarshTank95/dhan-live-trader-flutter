@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/backtest_result_model.dart';
 import '../models/daily_run_summary_model.dart';
+import '../models/paper_position_model.dart';
+import '../models/paper_trade_model.dart';
 import '../models/strategy_config_model.dart';
 import '../models/strategy_trade_model.dart';
 import '../models/watchlist_model.dart';
@@ -18,6 +20,11 @@ class StorageService {
   static const _keyDailyRunHistory = 'daily_run_history';
   static const _keyBacktestResults = 'backtest_results';
   static const _keyActiveStrategyConfigId = 'active_strategy_config_id';
+  static const _keyPaperPositions = 'paper_positions';
+  static const _keyPaperTrades = 'paper_trades';
+  static const _keyPaperBalance = 'paper_balance';
+  static const _keyPaperInitialCapital = 'paper_initial_capital';
+  static const _keyTradingMode = 'trading_mode';
 
   // ── Active Strategy Tracking ───────────────────────────────────────
   static Future<void> setActiveStrategy(String? configId) async {
@@ -251,5 +258,81 @@ class StorageService {
   static Future<void> clearAllBacktestResults() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_keyBacktestResults);
+  }
+
+  // ── Trading Mode (Paper / Live) ─────────────────────────────────────
+  static Future<void> saveTradingMode(String mode) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyTradingMode, mode);
+  }
+
+  static Future<String> loadTradingMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_keyTradingMode) ?? 'paper';
+  }
+
+  // ── Paper Trading ───────────────────────────────────────────────────
+  static Future<void> savePaperPositions(
+      List<PaperPositionModel> positions) async {
+    final prefs = await SharedPreferences.getInstance();
+    final json = jsonEncode(positions.map((p) => p.toJson()).toList());
+    await prefs.setString(_keyPaperPositions, json);
+  }
+
+  static Future<List<PaperPositionModel>> loadPaperPositions() async {
+    final prefs = await SharedPreferences.getInstance();
+    final json = prefs.getString(_keyPaperPositions);
+    if (json == null) return [];
+    try {
+      final list = jsonDecode(json) as List<dynamic>;
+      return list
+          .map((e) => PaperPositionModel.fromJson(e as Map<String, dynamic>))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  static Future<void> savePaperTrades(List<PaperTradeModel> trades) async {
+    final prefs = await SharedPreferences.getInstance();
+    final json = jsonEncode(trades.map((t) => t.toJson()).toList());
+    await prefs.setString(_keyPaperTrades, json);
+  }
+
+  static Future<List<PaperTradeModel>> loadPaperTrades() async {
+    final prefs = await SharedPreferences.getInstance();
+    final json = prefs.getString(_keyPaperTrades);
+    if (json == null) return [];
+    try {
+      final list = jsonDecode(json) as List<dynamic>;
+      return list
+          .map((e) => PaperTradeModel.fromJson(e as Map<String, dynamic>))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  static Future<void> savePaperBalance(
+      double available, double initial) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_keyPaperBalance, available);
+    await prefs.setDouble(_keyPaperInitialCapital, initial);
+  }
+
+  static Future<({double available, double initial})?> loadPaperBalance() async {
+    final prefs = await SharedPreferences.getInstance();
+    final available = prefs.getDouble(_keyPaperBalance);
+    final initial = prefs.getDouble(_keyPaperInitialCapital);
+    if (available == null) return null;
+    return (available: available, initial: initial ?? 1000000);
+  }
+
+  static Future<void> clearPaperData() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_keyPaperPositions);
+    await prefs.remove(_keyPaperTrades);
+    await prefs.remove(_keyPaperBalance);
+    await prefs.remove(_keyPaperInitialCapital);
   }
 }
