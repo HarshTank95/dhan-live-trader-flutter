@@ -27,15 +27,121 @@ void _logError(String tag, String msg) {
   } catch (_) {}
 }
 
+/// A dominance candidate captured during the current run. Snapshot lives in
+/// the main isolate so the dashboard can rebuild without losing it.
+class StrategySessionCandidate {
+  final String symbol;
+  final double entryPrice;
+  final double stopLoss;
+  final DateTime time;
+  final String status; // 'Watching' | 'Traded'
+
+  const StrategySessionCandidate({
+    required this.symbol,
+    required this.entryPrice,
+    required this.stopLoss,
+    required this.time,
+    required this.status,
+  });
+
+  StrategySessionCandidate copyWith({String? status}) =>
+      StrategySessionCandidate(
+        symbol: symbol,
+        entryPrice: entryPrice,
+        stopLoss: stopLoss,
+        time: time,
+        status: status ?? this.status,
+      );
+}
+
+/// Live snapshot of the running strategy's UI-relevant state. The dashboard
+/// seeds itself from this on init so widget rebuilds / re-entries don't wipe
+/// the phase indicator, status message, progress, candidates, etc.
+class StrategySessionState {
+  String? configId;
+  int currentPhase; // 0=idle, 1=loading, 2=premarket, 3=screening, 4=monitoring, 5=completed
+  String statusMessage;
+  int progress;
+  int candidateCount;
+  int activeStocks;
+  List<StrategySessionCandidate> candidates;
+
+  StrategySessionState({
+    this.configId,
+    this.currentPhase = 0,
+    this.statusMessage = '',
+    this.progress = 0,
+    this.candidateCount = 0,
+    this.activeStocks = 0,
+    List<StrategySessionCandidate>? candidates,
+  }) : candidates = candidates ?? [];
+
+  StrategySessionState clone() => StrategySessionState(
+        configId: configId,
+        currentPhase: currentPhase,
+        statusMessage: statusMessage,
+        progress: progress,
+        candidateCount: candidateCount,
+        activeStocks: activeStocks,
+        candidates: List<StrategySessionCandidate>.from(candidates),
+      );
+}
+
+/// One row in the strategy activity log. Captured centrally so it survives
+/// dashboard widget rebuilds and re-entries from the strategy list.
+class StrategyActivityRecord {
+  final String type; // 'info' | 'signal' | 'trade_entry' | 'trade_sl_hit' | 'trade_target_hit' | 'trade_eod_exit' | 'completed' | 'error'
+  final String configId;
+  final String message;
+  final DateTime time;
+  final Map<String, dynamic> data;
+
+  const StrategyActivityRecord({
+    required this.type,
+    required this.configId,
+    required this.message,
+    required this.time,
+    this.data = const {},
+  });
+}
+
 /// Manages the Android foreground service for running strategies in background.
 class StrategyBackgroundService {
   StrategyBackgroundService._();
 
   static const _notificationChannelId = 'strategy_service';
   static const _notificationId = 888;
+  static const _activityMax = 300;
 
   static final FlutterBackgroundService _service = FlutterBackgroundService();
   static bool _initialized = false;
+
+  // ── Activity buffer + session snapshot (main isolate, survives widget rebuilds) ──
+  static final List<StrategyActivityRecord> _activityBuffer = [];
+  static String? _activityConfigId;
+  static final StreamController<StrategyActivityRecord> _activityCtrl =
+      StreamController<StrategyActivityRecord>.broadcast();
+  static bool _activityWired = false;
+  static final StrategySessionState _session = StrategySessionState();
+
+  /// Past activity entries for the given config. Newest last.
+  static List<StrategyActivityRecord> activityFor(String configId) {
+    return _activityBuffer
+        .where((r) => r.configId == configId)
+        .toList(growable: false);
+  }
+
+  /// New activity entries as they arrive. Filter by configId on the consumer.
+  static Stream<StrategyActivityRecord> get activityStream =>
+      _activityCtrl.stream;
+
+  /// Snapshot of the running strategy's UI-relevant state for the given
+  /// config. Returns an empty state if the active config doesn't match —
+  /// the dashboard is responsible for not seeding from a foreign session.
+  static StrategySessionState sessionFor(String configId) {
+    if (_session.configId != configId) return StrategySessionState();
+    return _session.clone();
+  }
 
   /// Initialize the background service. Call once at app startup.
   static Future<void> initialize() async {
@@ -81,9 +187,186 @@ class StrategyBackgroundService {
       );
 
       _initialized = true;
+      _wireActivityCapture();
       _log('BgService', 'initialize() completed OK');
     } catch (e, stack) {
       _logError('BgService', 'initialize CRASHED: $e\n$stack');
+    }
+  }
+
+  /// Subscribes once to all service event streams and folds them into a
+  /// central buffer. The dashboard reads this buffer on init so the activity
+  /// log is preserved across widget rebuilds and re-entries.
+  static void _wireActivityCapture() {
+    if (_activityWired) return;
+    _activityWired = true;
+
+    _service.on('phase').listen((event) {
+      if (event == null) return;
+      final phase = event['phase'] as String? ?? '';
+      final message = event['message'] as String? ?? '';
+      switch (phase) {
+        case 'loading':
+          _session.currentPhase = 1;
+        case 'preparing':
+        case 'prepared':
+          _session.currentPhase = 2;
+        case 'screening':
+          _session.currentPhase = 3;
+      }
+      if (message.isNotEmpty) _session.statusMessage = message;
+    });
+
+    _service.on('update').listen((event) {
+      if (event == null) return;
+      final status = event['status'] as String?;
+      final message = event['message'] as String? ?? '';
+      final progress = event['progress'] as int?;
+      final candidates = event['candidates'] as int?;
+      final activeStocks = event['activeStocks'] as int?;
+      final cidRaw = event['configId'] as String?;
+
+      // Every 'running' event marks a fresh run — wipe activity + session so
+      // the dashboard starts clean (matches the local clear on Start).
+      if (status == 'running' && cidRaw != null && cidRaw.isNotEmpty) {
+        _activityBuffer.clear();
+        _activityConfigId = cidRaw;
+        _session
+          ..configId = cidRaw
+          ..currentPhase = 1
+          ..statusMessage = ''
+          ..progress = 0
+          ..candidateCount = 0
+          ..activeStocks = 0
+          ..candidates = [];
+      }
+
+      if (message.isNotEmpty) _session.statusMessage = message;
+      if (progress != null) _session.progress = progress;
+      if (candidates != null) _session.candidateCount = candidates;
+      if (activeStocks != null) _session.activeStocks = activeStocks;
+
+      if (message.contains('Fetching') || message.contains('Waiting for')) {
+        _session.currentPhase = 3;
+      }
+      if (message.contains('Monitoring LTP') ||
+          message.contains('candidates found')) {
+        if (_session.candidateCount > 0) _session.currentPhase = 4;
+      }
+
+      if (status == 'stopped' || status == 'completed') {
+        _session.progress = 0;
+        _session.currentPhase = status == 'completed' ? 5 : 0;
+      }
+
+      if (message.isNotEmpty) {
+        _pushActivity(StrategyActivityRecord(
+          type: 'info',
+          configId: _activityConfigId ?? cidRaw ?? '',
+          message: message,
+          time: DateTime.now(),
+        ));
+      }
+    });
+
+    _service.on('signal_found').listen((event) {
+      if (event == null) return;
+      final symbol = event['symbol'] as String? ?? '';
+      final entryNum = (event['entryPrice'] as num?)?.toDouble() ?? 0;
+      final slNum = (event['stopLoss'] as num?)?.toDouble() ?? 0;
+
+      _session.candidates.add(StrategySessionCandidate(
+        symbol: symbol,
+        entryPrice: entryNum,
+        stopLoss: slNum,
+        time: DateTime.now(),
+        status: 'Watching',
+      ));
+      _session.candidateCount = _session.candidates.length;
+      _session.currentPhase = 4;
+
+      _pushActivity(StrategyActivityRecord(
+        type: 'signal',
+        configId: _activityConfigId ?? '',
+        message:
+            'DOMINANCE: $symbol Entry=${entryNum.toStringAsFixed(1)} SL=${slNum.toStringAsFixed(1)}',
+        time: DateTime.now(),
+        data: Map<String, dynamic>.from(event),
+      ));
+    });
+
+    _service.on('trade_update').listen((event) {
+      if (event == null) return;
+      final type = event['type'] as String? ?? '';
+      final symbol = event['symbol'] as String? ?? '';
+      final isPaper = event['isPaper'] as bool? ?? true;
+
+      // Mark the matching candidate as 'Traded' on entry.
+      if (type == 'entry') {
+        for (int i = 0; i < _session.candidates.length; i++) {
+          final c = _session.candidates[i];
+          if (c.symbol == symbol && c.status == 'Watching') {
+            _session.candidates[i] = c.copyWith(status: 'Traded');
+            break;
+          }
+        }
+      }
+
+      String message;
+      if (type == 'entry') {
+        final qty = event['quantity'];
+        final entry = event['entryPrice'];
+        message = '${isPaper ? "[PAPER]" : "[LIVE]"} BUY $symbol Qty=$qty @ $entry';
+      } else if (type == 'sl_hit') {
+        final pnl = (event['pnl'] as num?)?.toStringAsFixed(0) ?? '0';
+        message = 'SL HIT: $symbol P&L=Rs $pnl';
+      } else if (type == 'target_hit') {
+        final pnl = (event['pnl'] as num?)?.toStringAsFixed(0) ?? '0';
+        message = 'TARGET: $symbol P&L=Rs $pnl';
+      } else if (type == 'eod_exit') {
+        message = 'EOD EXIT: $symbol';
+      } else {
+        message = '$type: $symbol';
+      }
+      _pushActivity(StrategyActivityRecord(
+        type: 'trade_$type',
+        configId: _activityConfigId ?? '',
+        message: message,
+        time: DateTime.now(),
+        data: Map<String, dynamic>.from(event),
+      ));
+    });
+
+    _service.on('completed').listen((event) {
+      if (event == null) return;
+      _session.currentPhase = 5;
+      _session.progress = 0;
+      _pushActivity(StrategyActivityRecord(
+        type: 'completed',
+        configId: _activityConfigId ?? '',
+        message: event['message'] as String? ?? 'Strategy completed',
+        time: DateTime.now(),
+      ));
+    });
+
+    _service.on('error').listen((event) {
+      if (event == null) return;
+      _pushActivity(StrategyActivityRecord(
+        type: 'error',
+        configId: _activityConfigId ?? '',
+        message: event['message'] as String? ?? 'Error occurred',
+        time: DateTime.now(),
+      ));
+    });
+  }
+
+  static void _pushActivity(StrategyActivityRecord r) {
+    _activityBuffer.add(r);
+    if (_activityBuffer.length > _activityMax) {
+      _activityBuffer.removeAt(0);
+    }
+    if (!_activityCtrl.isClosed) {
+      _activityCtrl.add(r);
     }
   }
 

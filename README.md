@@ -133,6 +133,8 @@ Default: Risk INR 500, Target INR 2000 per trade, max 2 trades/day.
 - Paper/Live badge, stock count, SL amount badges
 - 3-dot menu: View Dashboard, Edit Config, Delete
 - "+" button in app bar to create additional strategies
+- **Cross-screen button sync** — START/STOP state stays in sync with the dashboard's button: starting from one screen flips the other automatically via the service's `running` event
+- **Resume sync** — re-checks the foreground service on `AppLifecycleState.resumed` so reopening the app never shows a stale START while the strategy is still running
 
 ### Strategy Dashboard
 - Gradient header with strategy name and START/STOP button
@@ -142,6 +144,7 @@ Default: Risk INR 500, Target INR 2000 per trade, max 2 trades/day.
 - **Candidates Section**: Horizontal scrollable cards for dominance signals showing symbol, entry price, SL, time, and status (Watching/Traded)
 - **Auto-scroll Activity Log**: Real-time activity feed that auto-scrolls to newest entry
 - **History Button**: Navigate to daily run history from app bar
+- **State restoration on re-entry** — leaving the dashboard and coming back (or minimizing the app) no longer wipes the UI. Phase indicator, status message, progress bar, candidate count, active-stocks count, candidates list (with traded/watching status preserved), and the full activity log are all re-seeded from a centralized session snapshot kept by the background service.
 
 ### Strategy Engine
 - Full engine running inside background isolate: `prepare()` → progressive screening → dominance scan → breakout monitoring → exit
@@ -158,10 +161,16 @@ Default: Risk INR 500, Target INR 2000 per trade, max 2 trades/day.
 ### Background Service (Foreground Service)
 - Strategy runs even when **phone is locked or app is minimized**
 - Uses Android foreground service via `flutter_background_service`
-- Small persistent notification: "Strategy Name (Paper/Live) — Scanning stocks..."
+- **Non-dismissable notification** (`ongoing: true`) — cannot be swiped away, ensures Android keeps the process alive while the UI is hidden
 - Requests notification permission on Android 13+ before starting
 - Auto-stops when strategy completes or user taps STOP
+- **Strict in-app stop** — the engine's `_stopRequested` flag is only flipped by `engine.stop()`, which is only called from the `service.on('stop')` listener, which only fires from `StrategyBackgroundService.stopService()` invoked by the in-app STOP buttons. No code path stops the engine other than the in-app button (or natural completion at 3:15 PM market close)
 - **Active strategy tracking**: Persists running config ID in SharedPreferences to prevent false "running" state on app restart (service stays alive but strategy may have completed)
+- **Session snapshot + activity buffer** (main isolate, survives widget rebuilds): a single `_wireActivityCapture()` listener wired in `initialize()` mirrors all engine events into:
+  - `StrategySessionState` — current phase, status message, progress, candidate count, active-stocks count, candidates list (with traded/watching status)
+  - `StrategyActivityRecord` buffer (max 300 entries) — exposed as `activityFor(configId)` for seeding + `activityStream` for live updates
+  - Both reset on each `status: 'running'` event so a new run starts clean
+  - The dashboard reads them in `initState` so reopening/re-entering never shows an empty UI mid-run
 
 ### Plugin Architecture
 - `BaseStrategy` abstract class with lifecycle: `prepare()` → `scan()` → `checkBreakout()` → `checkExit()`
@@ -572,6 +581,15 @@ Screening window ends → auto-stop → show results
 ### 20. F&O Not Showing in "All" Search Tab
 **Problem:** Searching "tata motors" in the All tab showed only equity, not F&O — even though F&O appeared in Futures/Options tabs individually. **Two causes:** (1) `underlying` getter relied on dash-parsing of TradingSymbol, but Dhan F&O symbols may not have dashes → equity name lookup failed. Fixed by storing explicit `underlyingSymbol` from CSV SymbolName column. (2) `.take(50)` filled by options (48) + equity (2) before futures appeared. Fixed by balanced per-segment collection (20 eq, 10 fut, 20 opt).
 
+### 21. START Button Returned After Minimize + Reopen
+**Problem:** After starting a strategy, minimizing the app, and reopening — the button showed START even though the foreground service was still running. **Root cause:** `_checkServiceRunning()` in the list screen ran in parallel with the async `_load()`. When `_configs` was still empty, the check `_configs.any((c) => c.id == activeConfigId)` failed and **cleared the persisted active-strategy flag**. The dashboard's `_checkRunning()` then read null and rendered START. Compounded by the dashboard's start path never calling `setActiveStrategy()` in the first place. **Fix:** chained `_checkServiceRunning()` to run after `_load()` completes; added a guard so the flag is never cleared while configs are still loading; dashboard now persists active-strategy on start and clears it on stop/completed; both screens added `WidgetsBindingObserver.didChangeAppLifecycleState` to re-check on resume; both screens handle `status: 'running'` from `onUpdate` to keep cross-screen button state in sync.
+
+### 22. Activity Log Empty After Navigating Back
+**Problem:** Backing out of the dashboard and re-entering while the strategy was running showed an empty Activity tab — even though signals/trades were continuously emitted. **Root cause:** `_activity` was a `List` inside `_StrategyDashboardScreenState`, populated only by live broadcast-stream events. New widget = empty list, and broadcast streams don't replay past events to late subscribers. **Fix:** added a static `_activityBuffer` (max 300) inside `StrategyBackgroundService` populated by a single `_wireActivityCapture()` listener wired once in `initialize()`. Dashboard reads `activityFor(configId)` in `initState` and subscribes to `activityStream` for new rows. Buffer auto-clears on every `status: 'running'` event so a new run starts fresh.
+
+### 23. Phase / Candidates / Status Lost on Widget Rebuild
+**Problem:** Same shape as #22 but for `_currentPhase`, `_statusMessage`, `_progress`, `_candidateCount`, `_activeStocks`, and the `_candidates` list — all reset to zero/empty after navigating back into the dashboard mid-run. Phase indicator jumped back to "Load", candidate strip was empty, status said "Ready to start", etc. **Fix:** extended the central buffer concept to a `StrategySessionState` snapshot kept alongside the activity buffer, updated by the same `_wireActivityCapture()` listeners. Dashboard's `_seedFromBuffer()` reads it in `initState` and restores all six fields (candidate `Watching`/`Traded` status preserved). Snapshot resets on `status: 'running'` so each new run starts clean.
+
 ---
 
 ## Build Phases
@@ -622,6 +640,11 @@ Screening window ends → auto-stop → show results
 - Short selling support with COVER flow
 - Premium positions screen with day P&L tracking
 - Trade history with full entry/exit details
+- **Strategy lifecycle & state persistence overhaul**:
+  - Cross-screen START/STOP button sync (list ↔ dashboard) via `status: 'running'` events
+  - `WidgetsBindingObserver` on both screens — re-checks running state on `AppLifecycleState.resumed`
+  - Centralized activity buffer + session snapshot in `StrategyBackgroundService` so the dashboard's phase, candidates, progress, and activity log all survive widget rebuilds and re-entries
+  - Strict in-app stop: only the in-app STOP button can stop a running engine (no auto-stop except natural 3:15 PM completion)
 
 ### Phase 6 (Next)
 - Live trading via Dhan Order API

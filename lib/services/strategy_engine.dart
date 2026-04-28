@@ -173,6 +173,7 @@ class StrategyEngine {
 
     int success = 0;
     int failed = 0;
+    String? firstFailReason;
 
     for (int i = 0; i < _securityIds.length; i++) {
       if (_stopRequested) return;
@@ -188,9 +189,22 @@ class StrategyEngine {
           success++;
         } else {
           failed++;
+          // Log first 3 failures to help diagnose
+          if (failed <= 3) {
+            _log('Engine', 'WARN: $symbol ($secId) returned 0 candles for all $days days');
+          }
         }
       } catch (e) {
         failed++;
+        if (failed <= 3) {
+          _log('Engine', 'ERROR: $symbol ($secId) pre-market exception: $e');
+        }
+        firstFailReason ??= '$symbol: $e';
+      }
+
+      // Early diagnostic: if first 10 stocks all failed, log a warning
+      if (i == 9 && success == 0 && failed == 10) {
+        _log('Engine', 'WARNING: First 10 stocks ALL failed! Possible API/auth issue. First failure: ${firstFailReason ?? "unknown"}');
       }
 
       // Progress update every 25 stocks
@@ -206,6 +220,18 @@ class StrategyEngine {
     }
 
     _log('Engine', 'Pre-market complete: $success success, $failed failed');
+    if (failed > 0 && success == 0) {
+      // Build actionable error message from what _logOnce captured
+      final causes = <String>[];
+      if (_loggedOnce.contains('auth_fail')) causes.add('ACCESS TOKEN EXPIRED — generate a new token on Dhan developer portal');
+      if (_loggedOnce.contains('rate_429') || _loggedOnce.contains('dhan_805') || _loggedOnce.contains('dhan_DH-904')) causes.add('RATE LIMITED — too many API calls, try increasing delay');
+      if (_loggedOnce.contains('fetch_exception')) causes.add('NETWORK ERROR — check internet connection');
+      if (causes.isEmpty) causes.add('ALL DATES RETURNED EMPTY — possible market holiday week or API issue');
+
+      _log('Engine', 'CRITICAL: ALL $failed stocks failed pre-market data load! 0 candidates will be found.');
+      _log('Engine', 'CRITICAL: Root cause: ${causes.join(" | ")}');
+      _log('Engine', 'CRITICAL: FIX → ${causes.first.split(" — ").last}');
+    }
 
     // Remove security IDs that have no metrics
     _securityIds = _securityIds.where((id) => _stockMetrics.containsKey(id)).toList();
@@ -217,6 +243,8 @@ class StrategyEngine {
 
     int fetched = 0;
     int daysBack = 0;
+    int emptyDays = 0;
+    int errorDays = 0;
     while (fetched < days && daysBack < days + 15) {
       daysBack++;
       final date = today.subtract(Duration(days: daysBack));
@@ -227,13 +255,22 @@ class StrategyEngine {
         if (candles.isNotEmpty) {
           allCandles.addAll(candles.reversed); // oldest first
           fetched++;
+        } else {
+          emptyDays++;
         }
-      } catch (_) {
-        // Skip failed days
+      } catch (e) {
+        errorDays++;
       }
     }
 
-    if (allCandles.isEmpty) return null;
+    if (allCandles.isEmpty) {
+      // Only log first stock's breakdown to avoid spam — _logOnce ensures one entry
+      _logOnce('Engine',
+          'DEBUG: First stock failure breakdown — $symbol: emptyDays=$emptyDays, errorDays=$errorDays, daysChecked=$daysBack '
+          '(empty=API returned no candles for that date, error=network/API exception)',
+          'first_stock_fail');
+      return null;
+    }
 
     final avgVolume = allCandles.fold<double>(0, (sum, c) => sum + c.volume) / allCandles.length;
     final avgCandleSize = allCandles.fold<double>(0, (sum, c) => sum + (c.high - c.low)) / allCandles.length;
@@ -818,33 +855,43 @@ class StrategyEngine {
             'fromDate': '$dateStr 09:15:00',
             'toDate': '$dateStr 15:30:00',
           }),
-        );
+        ).timeout(const Duration(seconds: 15));
 
-        if (response.statusCode == 400) return []; // No data
+        if (response.statusCode == 400) return []; // No data for this date (holiday etc.)
         if (response.statusCode == 429 && attempt < maxRetries) {
+          _logOnce('Engine', 'WARN: Rate limited (429) on candle fetch, retrying...', 'rate_429');
           await Future.delayed(Duration(milliseconds: retryDelay));
           retryDelay *= 2;
           continue;
+        }
+        if (response.statusCode == 401 || response.statusCode == 403) {
+          _logOnce('Engine', 'ERROR: Auth failed (${response.statusCode}) fetching candles — access token may be expired. Body: ${response.body.length > 200 ? response.body.substring(0, 200) : response.body}', 'auth_fail');
+          return [];
         }
         // Dhan error 805 — too many requests
         if (response.statusCode != 200) {
           try {
             final errBody = jsonDecode(response.body);
-            if (errBody is Map &&
-                (errBody['errorCode'] == '805' ||
-                    errBody['errorCode'] == 'DH-904') &&
-                attempt < maxRetries) {
+            final errCode = errBody is Map ? errBody['errorCode']?.toString() : null;
+            if ((errCode == '805' || errCode == 'DH-904') && attempt < maxRetries) {
+              _logOnce('Engine', 'WARN: Dhan error $errCode, retrying...', 'dhan_$errCode');
               await Future.delayed(Duration(milliseconds: retryDelay));
               retryDelay *= 2;
               continue;
             }
-          } catch (_) {}
+            // Log unexpected API errors
+            _logOnce('Engine', 'ERROR: Candle API HTTP ${response.statusCode} for secId=$secId date=$dateStr — ${response.body.length > 200 ? response.body.substring(0, 200) : response.body}', 'http_${response.statusCode}');
+          } catch (_) {
+            _logOnce('Engine', 'ERROR: Candle API HTTP ${response.statusCode} for secId=$secId date=$dateStr (unparseable body)', 'http_${response.statusCode}');
+          }
           return [];
         }
 
         return _parseCandles(response.body);
       } catch (e) {
-        if (attempt < maxRetries) {
+        if (attempt == maxRetries) {
+          _logOnce('Engine', 'ERROR: Candle fetch failed after $maxRetries retries for secId=$secId date=$dateStr: $e', 'fetch_exception');
+        } else {
           await Future.delayed(Duration(milliseconds: retryDelay));
           retryDelay *= 2;
         }
@@ -938,6 +985,14 @@ class StrategyEngine {
         AppLogger.info(tag, msg);
       }
     } catch (_) {}
+  }
+
+  /// Log a message only once per key — prevents log spam during pre-market loading
+  final _loggedOnce = <String>{};
+  void _logOnce(String tag, String msg, String key) {
+    if (_loggedOnce.contains(key)) return;
+    _loggedOnce.add(key);
+    _log(tag, msg);
   }
 
   void _sendUpdate(String event, Map<String, dynamic> data) {

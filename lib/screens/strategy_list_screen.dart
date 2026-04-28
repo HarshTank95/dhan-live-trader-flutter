@@ -25,7 +25,8 @@ class StrategyListScreen extends StatefulWidget {
   State<StrategyListScreen> createState() => _StrategyListScreenState();
 }
 
-class _StrategyListScreenState extends State<StrategyListScreen> {
+class _StrategyListScreenState extends State<StrategyListScreen>
+    with WidgetsBindingObserver {
   List<StrategyConfigModel> _configs = [];
   bool _isLoading = true;
 
@@ -37,16 +38,25 @@ class _StrategyListScreenState extends State<StrategyListScreen> {
   @override
   void initState() {
     super.initState();
-    _load();
+    WidgetsBinding.instance.addObserver(this);
     _listenToService();
+    _load().then((_) => _checkServiceRunning());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     for (final sub in _subs) {
       sub.cancel();
     }
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkServiceRunning();
+    }
   }
 
   void _listenToService() {
@@ -56,10 +66,15 @@ class _StrategyListScreenState extends State<StrategyListScreen> {
       if (event == null) return;
       final status = event['status'] as String?;
       final message = event['message'] as String? ?? '';
+      final configId = event['configId'] as String?;
 
       if (mounted) {
         setState(() {
           if (message.isNotEmpty) _statusMessage = message;
+          if (status == 'running' && configId != null && configId.isNotEmpty) {
+            _runningStates[configId] = true;
+            StorageService.setActiveStrategy(configId);
+          }
           if (status == 'stopped' || status == 'completed') {
             _runningStates.updateAll((key, value) => false);
             _statusMessage = '';
@@ -82,9 +97,6 @@ class _StrategyListScreenState extends State<StrategyListScreen> {
         ),
       );
     }));
-
-    // Check if service is already running (app reopened while running)
-    _checkServiceRunning();
   }
 
   Future<void> _checkServiceRunning() async {
@@ -92,12 +104,17 @@ class _StrategyListScreenState extends State<StrategyListScreen> {
     if (activeConfigId == null || !mounted) return;
 
     final running = await StrategyBackgroundService.isRunning();
-    if (running && _configs.any((c) => c.id == activeConfigId)) {
-      setState(() {
-        _runningStates[activeConfigId] = true;
-      });
-    } else {
-      // Service not running but stale flag — clear it
+    if (running) {
+      // Service is alive — sync UI even if configs still loading.
+      if (mounted) {
+        setState(() {
+          _runningStates[activeConfigId] = true;
+        });
+      }
+    } else if (_configs.isNotEmpty) {
+      // Service not running and configs are loaded → flag is stale, clear it.
+      // Skip clearing while _configs is empty to avoid wiping the flag during
+      // a race with _load() on app resume.
       await StorageService.setActiveStrategy(null);
     }
   }

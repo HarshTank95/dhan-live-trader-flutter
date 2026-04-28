@@ -23,7 +23,8 @@ class StrategyDashboardScreen extends StatefulWidget {
       _StrategyDashboardScreenState();
 }
 
-class _StrategyDashboardScreenState extends State<StrategyDashboardScreen> {
+class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
+    with WidgetsBindingObserver {
   bool _isRunning = false;
   String _statusMessage = 'Ready to start';
   int _progress = 0;
@@ -48,18 +49,105 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _seedFromBuffer();
     _listenToService();
     _loadTrades();
     _checkRunning();
   }
 
+  void _seedFromBuffer() {
+    // Activity log
+    final past = StrategyBackgroundService.activityFor(widget.config.id);
+    for (final r in past) {
+      _addActivityFromRecord(r);
+    }
+    // Phase / status / progress / candidates
+    final s = StrategyBackgroundService.sessionFor(widget.config.id);
+    if (s.configId == widget.config.id) {
+      _currentPhase = s.currentPhase;
+      _statusMessage = s.statusMessage.isNotEmpty
+          ? s.statusMessage
+          : _statusMessage;
+      _progress = s.progress;
+      _candidateCount = s.candidateCount;
+      _activeStocks = s.activeStocks;
+      _candidates
+        ..clear()
+        ..addAll(s.candidates.map((c) => _CandidateInfo(
+              symbol: c.symbol,
+              entryPrice: c.entryPrice,
+              stopLoss: c.stopLoss,
+              time: c.time,
+              status: c.status,
+            )));
+    }
+  }
+
+  void _addActivityFromRecord(StrategyActivityRecord r) {
+    final IconData icon;
+    final Color color;
+    switch (r.type) {
+      case 'signal':
+        icon = Icons.candlestick_chart;
+        color = Colors.orange;
+      case 'trade_entry':
+        icon = Icons.arrow_upward;
+        color = Colors.green;
+      case 'trade_sl_hit':
+        icon = Icons.arrow_downward;
+        color = Colors.red;
+      case 'trade_target_hit':
+        icon = Icons.star;
+        color = Colors.green;
+      case 'trade_eod_exit':
+        icon = Icons.schedule;
+        color = Colors.orange;
+      case 'completed':
+        icon = Icons.check_circle;
+        color = Colors.blue;
+      case 'error':
+        icon = Icons.error;
+        color = Colors.red;
+      default:
+        icon = Icons.info_outline;
+        color = Colors.blue;
+    }
+    _activity.insert(0, _ActivityEntry(
+      icon: icon,
+      color: color,
+      message: r.message,
+      time: r.time,
+    ));
+    if (_activity.length > 100) _activity.removeLast();
+
+    // Auto-scroll to top (newest entry)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_activityScrollCtrl.hasClients) {
+        _activityScrollCtrl.animateTo(
+          0,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     for (final sub in _subs) {
       sub.cancel();
     }
     _activityScrollCtrl.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkRunning();
+    }
   }
 
   Future<void> _checkRunning() async {
@@ -87,6 +175,12 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen> {
   }
 
   void _listenToService() {
+    // Activity entries (centrally buffered → survives widget rebuilds)
+    _subs.add(StrategyBackgroundService.activityStream.listen((r) {
+      if (r.configId != widget.config.id || !mounted) return;
+      setState(() => _addActivityFromRecord(r));
+    }));
+
     // Phase updates
     _subs.add(StrategyBackgroundService.onPhase.listen((event) {
       if (event == null || !mounted) return;
@@ -131,19 +225,21 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen> {
           if (_candidateCount > 0) _currentPhase = 4;
         }
 
+        if (status == 'running') {
+          _isRunning = true;
+        }
+
         if (status == 'stopped' || status == 'completed') {
           _isRunning = false;
           _progress = 0;
           _currentPhase = status == 'completed' ? 5 : 0;
+          StorageService.setActiveStrategy(null);
         }
 
-        if (message.isNotEmpty) {
-          _addActivity(Icons.info_outline, Colors.blue, message);
-        }
       });
     }));
 
-    // Signals found (dominance candidates)
+    // Signals found (dominance candidates) — activity entry comes via activityStream
     _subs.add(StrategyBackgroundService.onSignal.listen((event) {
       if (event == null || !mounted) return;
       final symbol = event['symbol'] as String? ?? '';
@@ -160,25 +256,17 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen> {
           time: DateTime.now(),
           status: 'Watching',
         ));
-        _addActivity(
-          Icons.candlestick_chart,
-          Colors.orange,
-          'DOMINANCE: $symbol Entry=${entry.toStringAsFixed(1)} SL=${sl.toStringAsFixed(1)}',
-        );
       });
     }));
 
-    // Trade updates
+    // Trade updates — activity entry comes via activityStream
     _subs.add(StrategyBackgroundService.onTrade.listen((event) {
       if (event == null || !mounted) return;
       final type = event['type'] as String? ?? '';
       final symbol = event['symbol'] as String? ?? '';
-      final isPaper = event['isPaper'] as bool? ?? true;
 
-      setState(() {
-        if (type == 'entry') {
-          final qty = event['quantity'];
-          final entry = event['entryPrice'];
+      if (type == 'entry') {
+        setState(() {
           // Mark candidate as traded
           for (int i = 0; i < _candidates.length; i++) {
             if (_candidates[i].symbol == symbol && _candidates[i].status == 'Watching') {
@@ -186,68 +274,29 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen> {
               break;
             }
           }
-          _addActivity(
-            Icons.arrow_upward,
-            Colors.green,
-            '${isPaper ? "[PAPER]" : "[LIVE]"} BUY $symbol Qty=$qty @ $entry',
-          );
-        } else if (type == 'sl_hit') {
-          final pnl = event['pnl'];
-          _addActivity(Icons.arrow_downward, Colors.red,
-              'SL HIT: $symbol P&L=Rs ${(pnl as num?)?.toStringAsFixed(0) ?? "0"}');
-        } else if (type == 'target_hit') {
-          final pnl = event['pnl'];
-          _addActivity(Icons.star, Colors.green,
-              'TARGET: $symbol P&L=Rs ${(pnl as num?)?.toStringAsFixed(0) ?? "0"}');
-        } else if (type == 'eod_exit') {
-          _addActivity(Icons.schedule, Colors.orange, 'EOD EXIT: $symbol');
-        }
-      });
+        });
+      }
 
       _loadTrades();
     }));
 
-    // Completed
+    // Completed — activity entry comes via activityStream
     _subs.add(StrategyBackgroundService.onCompleted.listen((event) {
       if (event == null || !mounted) return;
+      StorageService.setActiveStrategy(null);
       setState(() {
         _isRunning = false;
         _currentPhase = 5;
-        _addActivity(Icons.check_circle, Colors.blue,
-            event['message'] as String? ?? 'Strategy completed');
       });
       _loadTrades();
     }));
 
-    // Errors
-    _subs.add(StrategyBackgroundService.onError.listen((event) {
-      if (event == null || !mounted) return;
-      setState(() {
-        _addActivity(Icons.error, Colors.red,
-            event['message'] as String? ?? 'Error occurred');
-      });
+    // Errors — activity entry comes via activityStream
+    _subs.add(StrategyBackgroundService.onError.listen((_) {
+      // No-op: the error message is captured centrally and surfaces in the
+      // activity log. Keep the subscription so future error-specific UI
+      // (snackbars, etc.) has a hook.
     }));
-  }
-
-  void _addActivity(IconData icon, Color color, String message) {
-    _activity.insert(0, _ActivityEntry(
-      icon: icon,
-      color: color,
-      message: message,
-      time: DateTime.now(),
-    ));
-    if (_activity.length > 100) _activity.removeLast();
-
-    // Auto-scroll to top (newest entry)
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_activityScrollCtrl.hasClients) {
-        _activityScrollCtrl.animateTo(
-          0,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-        );
-      }
-    });
   }
 
   Future<void> _toggleStrategy() async {
@@ -271,6 +320,8 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen> {
 
       if (!mounted) return;
       if (started) {
+        await StorageService.setActiveStrategy(widget.config.id);
+        if (!mounted) return;
         setState(() {
           _isRunning = true;
           _currentPhase = 1;
@@ -280,7 +331,6 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen> {
           _candidateCount = 0;
           _activeStocks = 0;
           _progress = 0;
-          _addActivity(Icons.play_arrow, Colors.green, 'Strategy started');
         });
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -289,12 +339,12 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen> {
       }
     } else {
       await StrategyBackgroundService.stopService();
+      await StorageService.setActiveStrategy(null);
       if (mounted) {
         setState(() {
           _isRunning = false;
           _currentPhase = 0;
           _statusMessage = 'Stopped by user';
-          _addActivity(Icons.stop, Colors.red, 'Strategy stopped');
         });
       }
     }
