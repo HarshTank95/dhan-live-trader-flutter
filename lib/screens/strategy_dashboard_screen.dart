@@ -524,7 +524,7 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
               ),
             ),
             SizedBox(
-              height: 92,
+              height: 106,
               child: ListView.builder(
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
@@ -799,8 +799,10 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
               ),
             ],
           ),
-          const SizedBox(height: 4),
-          Text('Break ▲${c.entryPrice.toStringAsFixed(1)}  SL: ${c.stopLoss.toStringAsFixed(1)}',
+          const SizedBox(height: 3),
+          Text('Break ▲${c.entryPrice.toStringAsFixed(1)}',
+              style: const TextStyle(fontSize: 10, color: Colors.grey)),
+          Text('SL: ${c.stopLoss.toStringAsFixed(1)}',
               style: const TextStyle(fontSize: 10, color: Colors.grey)),
           Text(
             '$time  ${c.status}',

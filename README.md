@@ -141,7 +141,7 @@ Default: Risk INR 500, Target INR 2000 per trade, max 2 trades/day.
 - Config summary chips: Stocks, Active, Candidates, Trades
 - Paper/Live mode badge in app bar
 - **Phase Stepper**: Visual progress indicator — Load → Pre-Mkt → Screen → Monitor → Done (green checkmarks for completed, blue for active)
-- **Candidates Section**: Horizontal scrollable cards for dominance signals showing symbol, breakout level (`Break ▲`), SL, time, and status (Watching/Traded) — label is deliberately "Break ▲" not "Entry" to make clear no trade has been placed yet, it's a price to watch
+- **Candidates Section**: Horizontal scrollable cards for dominance signals — each card shows symbol, `Break ▲<price>` on one line, `SL: <price>` on the next line, then time + status (Watching/Traded). Split layout prevents wrapping on long prices (e.g. 2870.6). Label is deliberately "Break ▲" not "Entry" — no trade has been placed yet, it's a trigger level to watch
 - **Trades Section**: Horizontal scrollable cards showing today's trades only — past-day trades appear in history, not here
 - **Auto-scroll Activity Log**: Real-time activity feed that auto-scrolls to newest entry
 - **History Button**: Navigate to daily run history from app bar
@@ -609,7 +609,11 @@ Screening window ends → auto-stop → show results
 
 ### 25. Dashboard Candidate / Trade Cards Overlapping Next Section
 
-**Problem:** The candidates card strip (fixed height 72px) was barely tall enough for 3 lines of text — the bottom of the card visually clipped through the Trades header. Same issue on the Trades strip (80px). **Fix:** Increased candidates `SizedBox` height to 92px and trades to 96px; added `8px` bottom padding inside both `ListView`s so card edges never touch the section divider.
+**Problem:** The candidates card strip (fixed height 72px) was barely tall enough for 3 lines of text — the bottom of the card visually clipped through the Trades header. Same issue on the Trades strip (80px). **Fix:** Increased candidates `SizedBox` height to 92px (later 106px after the Break/SL split) and trades to 96px; added `8px` bottom padding inside both `ListView`s so card edges never touch the section divider.
+
+### 27. Candidate Card Break/SL Wrapping on Long Prices
+
+**Problem:** `Break ▲2870.6  SL: 362.1` was too long to fit on one line in the 140px-wide candidate card, causing SL to wrap to the next line and pushing the time/status row off the card. **Fix:** Split into two separate `Text` widgets (`Break ▲<price>` and `SL: <price>` on individual lines). Bumped candidate ListView height 92→106px to accommodate the extra line without clipping.
 
 ### 26. Phase / Candidates / Status Lost on Widget Rebuild
 **Problem:** Same shape as #22 but for `_currentPhase`, `_statusMessage`, `_progress`, `_candidateCount`, `_activeStocks`, and the `_candidates` list — all reset to zero/empty after navigating back into the dashboard mid-run. Phase indicator jumped back to "Load", candidate strip was empty, status said "Ready to start", etc. **Fix:** extended the central buffer concept to a `StrategySessionState` snapshot kept alongside the activity buffer, updated by the same `_wireActivityCapture()` listeners. Dashboard's `_seedFromBuffer()` reads it in `initState` and restores all six fields (candidate `Watching`/`Traded` status preserved). Snapshot resets on `status: 'running'` so each new run starts clean.
@@ -674,6 +678,8 @@ Screening window ends → auto-stop → show results
 - **Dashboard Trades section today-only** — trades filter now includes a date check so only today's trades appear on the dashboard; previous runs visible in history only
 - **Accurate history candidate count** — fixed `dominanceCandidates` in daily run summary to use a monotone `_totalSignalsGenerated` counter instead of `_alreadySignalled.length` (which shrank to 0 as signals expired)
 - **Candidate / Trade card layout fix** — increased ListView heights (72→92, 80→96) and added bottom padding so cards no longer clip into the next section's header
+- **Candidate card Break/SL split** — `Break ▲` and `SL:` now on separate lines so long prices (e.g. 2870.6) never wrap; candidate ListView height bumped to 106px
+- **`effectiveCandidates` computed getter on `DailyRunSummaryModel`** — infers candidate count from `activityLog` when the saved `dominanceCandidates` is 0, fixing old history records without touching stored data
 
 ### Phase 6 (Next)
 - Live trading via Dhan Order API

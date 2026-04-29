@@ -81,5 +81,12 @@ class DailyRunSummaryModel {
     );
   }
 
+  /// Returns the saved candidate count, or infers it from the activity log
+  /// for older records where dominanceCandidates was incorrectly saved as 0.
+  int get effectiveCandidates =>
+      dominanceCandidates > 0
+          ? dominanceCandidates
+          : activityLog.where((e) => e.startsWith('DOMINANCE:')).length;
+
   String toJsonString() => jsonEncode(toJson());
 }

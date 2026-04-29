@@ -189,7 +189,7 @@ class _StrategyHistoryScreenState extends State<StrategyHistoryScreen> {
                 children: [
                   _statBadge('Stocks', '${run.totalStocks}', Colors.blue),
                   const SizedBox(width: 6),
-                  _statBadge('Candidates', '${run.dominanceCandidates}', Colors.orange),
+                  _statBadge('Candidates', '${run.effectiveCandidates}', Colors.orange),
                   const SizedBox(width: 6),
                   _statBadge('Trades', '${run.totalTrades}', Colors.teal),
                   const SizedBox(width: 6),
@@ -270,7 +270,7 @@ class _StrategyHistoryScreenState extends State<StrategyHistoryScreen> {
                 // Summary stats
                 _detailRow('Total Stocks', '${run.totalStocks}'),
                 _detailRow('Final Active', '${run.finalActiveStocks}'),
-                _detailRow('Dominance Candidates', '${run.dominanceCandidates}'),
+                _detailRow('Dominance Candidates', '${run.effectiveCandidates}'),
                 _detailRow('Total Trades', '${run.totalTrades}'),
                 _detailRow('Winners', '${run.winners}'),
                 _detailRow('Losers', '${run.losers}'),
