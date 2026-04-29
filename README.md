@@ -138,10 +138,11 @@ Default: Risk INR 500, Target INR 2000 per trade, max 2 trades/day.
 
 ### Strategy Dashboard
 - Gradient header with strategy name and START/STOP button
-- Config summary chips: Stocks, Risk, Target, Max Trades
+- Config summary chips: Stocks, Active, Candidates, Trades
 - Paper/Live mode badge in app bar
 - **Phase Stepper**: Visual progress indicator — Load → Pre-Mkt → Screen → Monitor → Done (green checkmarks for completed, blue for active)
-- **Candidates Section**: Horizontal scrollable cards for dominance signals showing symbol, entry price, SL, time, and status (Watching/Traded)
+- **Candidates Section**: Horizontal scrollable cards for dominance signals showing symbol, breakout level (`Break ▲`), SL, time, and status (Watching/Traded) — label is deliberately "Break ▲" not "Entry" to make clear no trade has been placed yet, it's a price to watch
+- **Trades Section**: Horizontal scrollable cards showing today's trades only — past-day trades appear in history, not here
 - **Auto-scroll Activity Log**: Real-time activity feed that auto-scrolls to newest entry
 - **History Button**: Navigate to daily run history from app bar
 - **State restoration on re-entry** — leaving the dashboard and coming back (or minimizing the app) no longer wipes the UI. Phase indicator, status message, progress bar, candidate count, active-stocks count, candidates list (with traded/watching status preserved), and the full activity log are all re-seeded from a centralized session snapshot kept by the background service.
@@ -157,6 +158,19 @@ Default: Risk INR 500, Target INR 2000 per trade, max 2 trades/day.
 - Tap card → bottom sheet with full details + color-coded activity log
 - Delete individual days or clear all history
 - Max 30 days retained automatically
+
+### Pre-Market Reminders
+- **Per-strategy reminder notifications** so you don't forget to start a strategy before market open
+- Configurable lead time **5–180 min** (default 60) via slider on the strategy config screen
+- Fires **Mon–Fri only** at `9:15 AM IST − leadMinutes` (e.g. lead 60 → 8:15 AM)
+- **Tap the notification → strategy dashboard opens** directly (token-entry screen if you're logged out)
+- Reminder badge `🔔 8:15 AM` shown on the strategy card when enabled
+- Survives **reboot** via `RECEIVE_BOOT_COMPLETED` and `flutter_local_notifications` boot receiver
+- Re-armed automatically on app cold-start via `StrategyReminderService.syncAllReminders()`
+- Auto-cancels when the strategy is deleted or the reminder toggle is turned off
+- Uses `AndroidScheduleMode.inexactAllowWhileIdle` — no `SCHEDULE_EXACT_ALARM` permission prompt; ~minute-level accuracy is fine for a reminder
+- Hardcoded `Asia/Kolkata` timezone (NSE is IST, no DST), via `timezone` package
+- Notification IDs derived deterministically from `configId` (5 weekday slots per strategy, base = `100000 + (configId.hashCode & 0xFFFF)`) so re-syncing is idempotent
 
 ### Background Service (Foreground Service)
 - Strategy runs even when **phone is locked or app is minimized**
@@ -357,6 +371,7 @@ lib/
 │   ├── storage_service.dart               # SharedPreferences: credentials, watchlists, theme, configs, trades, active strategy
 │   ├── app_logger.dart                    # File-based logger with memory buffer
 │   ├── strategy_background_service.dart   # Android foreground service for background strategy execution
+│   ├── strategy_reminder_service.dart      # Per-strategy pre-market reminder notifications (Mon–Fri, IST)
 │   ├── strategy_engine.dart               # Live strategy execution engine (runs in background isolate)
 │   ├── backtest_engine.dart               # Backtest simulation engine (same rules as live)
 │   └── paper_trading_service.dart         # Paper trading: buy, sell, short, partial close, persistence
@@ -384,7 +399,8 @@ lib/
 | `candlesticks` | Candlestick chart widget |
 | `flutter_native_splash` | Branded splash screen |
 | `flutter_background_service` | Android foreground service for background execution |
-| `flutter_local_notifications` | Notification channel for foreground service |
+| `flutter_local_notifications` | Notification channels for the foreground service and pre-market reminders |
+| `timezone` | IST (Asia/Kolkata) scheduling for reminder notifications |
 | `share_plus` | Native share sheet for log export |
 
 ---
@@ -587,7 +603,15 @@ Screening window ends → auto-stop → show results
 ### 22. Activity Log Empty After Navigating Back
 **Problem:** Backing out of the dashboard and re-entering while the strategy was running showed an empty Activity tab — even though signals/trades were continuously emitted. **Root cause:** `_activity` was a `List` inside `_StrategyDashboardScreenState`, populated only by live broadcast-stream events. New widget = empty list, and broadcast streams don't replay past events to late subscribers. **Fix:** added a static `_activityBuffer` (max 300) inside `StrategyBackgroundService` populated by a single `_wireActivityCapture()` listener wired once in `initialize()`. Dashboard reads `activityFor(configId)` in `initState` and subscribes to `activityStream` for new rows. Buffer auto-clears on every `status: 'running'` event so a new run starts fresh.
 
-### 23. Phase / Candidates / Status Lost on Widget Rebuild
+### 24. History Candidate Count Always 0
+
+**Problem:** History list and detail sheet showed `Candidates: 0` even when the activity log contained DOMINANCE entries from that day. **Root cause:** `_saveDailyRunSummary` used `_alreadySignalled.length` for `dominanceCandidates`, but `_alreadySignalled` is a live set that shrinks as signals expire (`_alreadySignalled.remove()` is called at expiry). By end-of-run the set could be empty even if signals had been generated. **Fix:** Added a monotone `_totalSignalsGenerated` counter in `StrategyEngine` that only ever increments (never decrements). Daily summary now uses `_totalSignalsGenerated` so the count correctly reflects all signals generated during the run.
+
+### 25. Dashboard Candidate / Trade Cards Overlapping Next Section
+
+**Problem:** The candidates card strip (fixed height 72px) was barely tall enough for 3 lines of text — the bottom of the card visually clipped through the Trades header. Same issue on the Trades strip (80px). **Fix:** Increased candidates `SizedBox` height to 92px and trades to 96px; added `8px` bottom padding inside both `ListView`s so card edges never touch the section divider.
+
+### 26. Phase / Candidates / Status Lost on Widget Rebuild
 **Problem:** Same shape as #22 but for `_currentPhase`, `_statusMessage`, `_progress`, `_candidateCount`, `_activeStocks`, and the `_candidates` list — all reset to zero/empty after navigating back into the dashboard mid-run. Phase indicator jumped back to "Load", candidate strip was empty, status said "Ready to start", etc. **Fix:** extended the central buffer concept to a `StrategySessionState` snapshot kept alongside the activity buffer, updated by the same `_wireActivityCapture()` listeners. Dashboard's `_seedFromBuffer()` reads it in `initState` and restores all six fields (candidate `Watching`/`Traded` status preserved). Snapshot resets on `status: 'running'` so each new run starts clean.
 
 ---
@@ -645,6 +669,11 @@ Screening window ends → auto-stop → show results
   - `WidgetsBindingObserver` on both screens — re-checks running state on `AppLifecycleState.resumed`
   - Centralized activity buffer + session snapshot in `StrategyBackgroundService` so the dashboard's phase, candidates, progress, and activity log all survive widget rebuilds and re-entries
   - Strict in-app stop: only the in-app STOP button can stop a running engine (no auto-stop except natural 3:15 PM completion)
+- **Per-strategy pre-market reminders** — configurable lead-time notifications (Mon–Fri, 5–180 min before 9:15 AM IST), tap-to-open dashboard, survives reboot, auto-synced on cold start. New `StrategyReminderService` + `timezone` package + `RECEIVE_BOOT_COMPLETED` permission
+- **Dashboard Candidates relabeled** — "Entry:" replaced with "Break ▲" so it's clear the price is a breakout trigger level, not a filled trade; matching log messages updated accordingly
+- **Dashboard Trades section today-only** — trades filter now includes a date check so only today's trades appear on the dashboard; previous runs visible in history only
+- **Accurate history candidate count** — fixed `dominanceCandidates` in daily run summary to use a monotone `_totalSignalsGenerated` counter instead of `_alreadySignalled.length` (which shrank to 0 as signals expired)
+- **Candidate / Trade card layout fix** — increased ListView heights (72→92, 80→96) and added bottom padding so cards no longer clip into the next section's header
 
 ### Phase 6 (Next)
 - Live trading via Dhan Order API

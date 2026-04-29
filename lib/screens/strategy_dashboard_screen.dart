@@ -147,6 +147,10 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _checkRunning();
+    } else if (state == AppLifecycleState.paused) {
+      // Force pending activity / session writes to disk now so a swipe-away
+      // within the 500ms debounce doesn't drop recent events.
+      StrategyBackgroundService.flushNow();
     }
   }
 
@@ -165,10 +169,16 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
 
   Future<void> _loadTrades() async {
     final trades = await StorageService.loadStrategyTrades();
+    final today = DateTime.now();
     if (mounted) {
       setState(() {
         _trades = trades
             .where((t) => t.strategyConfigId == widget.config.id)
+            .where((t) =>
+                t.entryTime != null &&
+                t.entryTime!.year == today.year &&
+                t.entryTime!.month == today.month &&
+                t.entryTime!.day == today.day)
             .toList();
       });
     }
@@ -514,10 +524,10 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
               ),
             ),
             SizedBox(
-              height: 72,
+              height: 92,
               child: ListView.builder(
                 scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 12),
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
                 itemCount: _candidates.length,
                 itemBuilder: (context, i) => _buildCandidateCard(_candidates[i]),
               ),
@@ -548,10 +558,10 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
               ),
             ),
             SizedBox(
-              height: 80,
+              height: 96,
               child: ListView.builder(
                 scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 12),
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
                 itemCount: _trades.length,
                 itemBuilder: (context, i) {
                   final trade = _trades[i];
@@ -790,7 +800,7 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
             ],
           ),
           const SizedBox(height: 4),
-          Text('Entry: ${c.entryPrice.toStringAsFixed(1)}  SL: ${c.stopLoss.toStringAsFixed(1)}',
+          Text('Break ▲${c.entryPrice.toStringAsFixed(1)}  SL: ${c.stopLoss.toStringAsFixed(1)}',
               style: const TextStyle(fontSize: 10, color: Colors.grey)),
           Text(
             '$time  ${c.status}',

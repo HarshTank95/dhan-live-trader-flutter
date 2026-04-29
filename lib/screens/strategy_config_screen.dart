@@ -153,6 +153,10 @@ class _StrategyConfigScreenState extends State<StrategyConfigScreen> {
           ),
           const SizedBox(height: 8),
 
+          // Pre-market reminder
+          _buildReminderCard(),
+          const SizedBox(height: 8),
+
           // Stock universe count
           Card(
             shape:
@@ -249,6 +253,88 @@ class _StrategyConfigScreenState extends State<StrategyConfigScreen> {
 
           // Parameter sections
           ...grouped.entries.map((entry) => _buildSection(entry.key, entry.value)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReminderCard() {
+    const marketOpenMin = 9 * 60 + 15;
+    final reminderMinOfDay = marketOpenMin - _config.reminderMinutesBefore;
+    final h24 = reminderMinOfDay ~/ 60;
+    final m = reminderMinOfDay % 60;
+    final period = h24 >= 12 ? 'PM' : 'AM';
+    final h12 = h24 == 0 ? 12 : (h24 > 12 ? h24 - 12 : h24);
+    final fmtTime = '$h12:${m.toString().padLeft(2, '0')} $period';
+    final leadHrs = _config.reminderMinutesBefore / 60;
+    final leadDesc = leadHrs >= 1
+        ? '${leadHrs.toStringAsFixed(leadHrs == leadHrs.roundToDouble() ? 0 : 1)} hr before market open'
+        : '${_config.reminderMinutesBefore} min before market open';
+
+    return Card(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Column(
+        children: [
+          SwitchListTile(
+            title: const Text('Pre-Market Reminder',
+                style: TextStyle(fontWeight: FontWeight.w600)),
+            subtitle: Text(
+              _config.reminderEnabled
+                  ? 'Notify at $fmtTime ($leadDesc, Mon–Fri)'
+                  : 'Get a notification before market open to start this strategy',
+            ),
+            secondary: Icon(
+              Icons.notifications_active_outlined,
+              color: _config.reminderEnabled ? Colors.purple : Colors.grey,
+            ),
+            value: _config.reminderEnabled,
+            onChanged: (v) =>
+                setState(() => _config.reminderEnabled = v),
+          ),
+          if (_config.reminderEnabled) ...[
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+              child: Row(
+                children: [
+                  const Text('Lead time',
+                      style: TextStyle(fontSize: 13, color: Colors.grey)),
+                  const Spacer(),
+                  Text(
+                    '${_config.reminderMinutesBefore} min',
+                    style: const TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+            Slider(
+              value: _config.reminderMinutesBefore.toDouble(),
+              min: 5,
+              max: 180,
+              divisions: 35,
+              label: '${_config.reminderMinutesBefore} min',
+              activeColor: Colors.purple,
+              onChanged: (v) => setState(
+                  () => _config.reminderMinutesBefore = v.round()),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Row(
+                children: [
+                  const Icon(Icons.schedule, size: 14, color: Colors.purple),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Notification at $fmtTime IST',
+                    style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.purple,
+                        fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );

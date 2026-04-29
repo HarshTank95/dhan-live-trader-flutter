@@ -7,7 +7,12 @@ import 'screens/ltp_screen.dart';
 import 'services/app_logger.dart';
 import 'services/storage_service.dart';
 import 'services/strategy_background_service.dart';
+import 'services/strategy_reminder_service.dart';
 import 'strategies/strategy_registry.dart';
+
+/// Global navigator key — used by background services (reminder taps,
+/// notification deep-links) to push routes from outside the widget tree.
+final navigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   // Wrap entire app in error zone to catch ALL async errors
@@ -38,6 +43,13 @@ void main() async {
 
     await StrategyBackgroundService.initialize();
     AppLogger.info('App', 'BackgroundService initialized');
+
+    await StrategyReminderService.initialize(navigatorKey);
+    AppLogger.info('App', 'ReminderService initialized');
+
+    // Re-arm any saved reminders so they survive cold starts and reboots.
+    final savedConfigs = await StorageService.loadStrategyConfigs();
+    await StrategyReminderService.syncAllReminders(savedConfigs);
 
     final saved = await StorageService.loadCredentials();
     final isDark = await StorageService.loadTheme();
@@ -88,6 +100,7 @@ class _MyAppState extends State<MyApp> {
     return MaterialApp(
       title: 'Dhan LTP Viewer',
       debugShowCheckedModeBanner: false,
+      navigatorKey: navigatorKey,
       themeMode: _isDark ? ThemeMode.dark : ThemeMode.light,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),

@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/strategy_config_model.dart';
 import 'app_logger.dart';
 import 'strategy_engine.dart';
@@ -112,6 +114,8 @@ class StrategyBackgroundService {
   static const _notificationChannelId = 'strategy_service';
   static const _notificationId = 888;
   static const _activityMax = 300;
+  static const _kActivityKey = 'strategy_activity_buffer_v1';
+  static const _kSessionKey = 'strategy_session_state_v1';
 
   static final FlutterBackgroundService _service = FlutterBackgroundService();
   static bool _initialized = false;
@@ -187,10 +191,118 @@ class StrategyBackgroundService {
       );
 
       _initialized = true;
+      await _restoreFromDisk();
       _wireActivityCapture();
       _log('BgService', 'initialize() completed OK');
     } catch (e, stack) {
       _logError('BgService', 'initialize CRASHED: $e\n$stack');
+    }
+  }
+
+  // ── Disk persistence (survives main-isolate kill) ──
+  static Timer? _flushTimer;
+
+  static Future<void> _restoreFromDisk() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      final activityJson = prefs.getString(_kActivityKey);
+      if (activityJson != null && activityJson.isNotEmpty) {
+        final list = jsonDecode(activityJson) as List;
+        _activityBuffer.clear();
+        for (final e in list) {
+          final m = e as Map<String, dynamic>;
+          _activityBuffer.add(StrategyActivityRecord(
+            type: m['type'] as String? ?? 'info',
+            configId: m['configId'] as String? ?? '',
+            message: m['message'] as String? ?? '',
+            time: DateTime.tryParse(m['time'] as String? ?? '') ??
+                DateTime.now(),
+          ));
+        }
+        if (_activityBuffer.isNotEmpty) {
+          _activityConfigId = _activityBuffer.last.configId;
+        }
+      }
+
+      final sessionJson = prefs.getString(_kSessionKey);
+      if (sessionJson != null && sessionJson.isNotEmpty) {
+        final m = jsonDecode(sessionJson) as Map<String, dynamic>;
+        _session
+          ..configId = m['configId'] as String?
+          ..currentPhase = (m['currentPhase'] as int?) ?? 0
+          ..statusMessage = (m['statusMessage'] as String?) ?? ''
+          ..progress = (m['progress'] as int?) ?? 0
+          ..candidateCount = (m['candidateCount'] as int?) ?? 0
+          ..activeStocks = (m['activeStocks'] as int?) ?? 0
+          ..candidates = ((m['candidates'] as List?) ?? [])
+              .map((c) {
+                final cm = c as Map<String, dynamic>;
+                return StrategySessionCandidate(
+                  symbol: cm['symbol'] as String? ?? '',
+                  entryPrice: (cm['entryPrice'] as num?)?.toDouble() ?? 0,
+                  stopLoss: (cm['stopLoss'] as num?)?.toDouble() ?? 0,
+                  time: DateTime.tryParse(cm['time'] as String? ?? '') ??
+                      DateTime.now(),
+                  status: cm['status'] as String? ?? 'Watching',
+                );
+              })
+              .toList();
+      }
+      _log('BgService',
+          'Restored ${_activityBuffer.length} activity rows, ${_session.candidates.length} candidates from disk');
+    } catch (e) {
+      debugPrint('[BgService] Restore from disk failed: $e');
+    }
+  }
+
+  /// Debounced flush — coalesces rapid event bursts into one disk write.
+  static void _scheduleFlush() {
+    _flushTimer?.cancel();
+    _flushTimer = Timer(const Duration(milliseconds: 500), _flushToDisk);
+  }
+
+  /// Force any pending disk write to complete now. Call from
+  /// `AppLifecycleState.paused` so a swipe-away within the debounce window
+  /// doesn't lose recent activity.
+  static Future<void> flushNow() async {
+    _flushTimer?.cancel();
+    await _flushToDisk();
+  }
+
+  static Future<void> _flushToDisk() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final activityList = _activityBuffer
+          .map((r) => {
+                'type': r.type,
+                'configId': r.configId,
+                'message': r.message,
+                'time': r.time.toIso8601String(),
+              })
+          .toList();
+      await prefs.setString(_kActivityKey, jsonEncode(activityList));
+
+      final sessionMap = {
+        'configId': _session.configId,
+        'currentPhase': _session.currentPhase,
+        'statusMessage': _session.statusMessage,
+        'progress': _session.progress,
+        'candidateCount': _session.candidateCount,
+        'activeStocks': _session.activeStocks,
+        'candidates': _session.candidates
+            .map((c) => {
+                  'symbol': c.symbol,
+                  'entryPrice': c.entryPrice,
+                  'stopLoss': c.stopLoss,
+                  'time': c.time.toIso8601String(),
+                  'status': c.status,
+                })
+            .toList(),
+      };
+      await prefs.setString(_kSessionKey, jsonEncode(sessionMap));
+    } catch (e) {
+      debugPrint('[BgService] Flush to disk failed: $e');
     }
   }
 
@@ -215,6 +327,7 @@ class StrategyBackgroundService {
           _session.currentPhase = 3;
       }
       if (message.isNotEmpty) _session.statusMessage = message;
+      _scheduleFlush();
     });
 
     _service.on('update').listen((event) {
@@ -266,6 +379,10 @@ class StrategyBackgroundService {
           message: message,
           time: DateTime.now(),
         ));
+      } else {
+        // Session changed (progress / counts) without a user-facing message —
+        // still need to persist so a cold restart can restore it.
+        _scheduleFlush();
       }
     });
 
@@ -368,6 +485,7 @@ class StrategyBackgroundService {
     if (!_activityCtrl.isClosed) {
       _activityCtrl.add(r);
     }
+    _scheduleFlush();
   }
 
   /// Request notification permission (required on Android 13+).

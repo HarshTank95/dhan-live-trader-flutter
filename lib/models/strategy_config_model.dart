@@ -6,6 +6,8 @@ class StrategyConfigModel {
   String name;
   bool paperTrading;
   bool enabled; // can pause without deleting
+  bool reminderEnabled;
+  int reminderMinutesBefore; // 5..180, lead time before market open
   Map<String, dynamic> params;
   List<int> securityIds; // stock universe to scan
   final DateTime createdAt;
@@ -17,6 +19,8 @@ class StrategyConfigModel {
     required this.name,
     this.paperTrading = true,
     this.enabled = true,
+    this.reminderEnabled = false,
+    this.reminderMinutesBefore = 60,
     required this.params,
     this.securityIds = const [],
     DateTime? createdAt,
@@ -31,6 +35,8 @@ class StrategyConfigModel {
         'name': name,
         'paperTrading': paperTrading,
         'enabled': enabled,
+        'reminderEnabled': reminderEnabled,
+        'reminderMinutesBefore': reminderMinutesBefore,
         'params': params,
         'securityIds': securityIds,
         'createdAt': createdAt.toIso8601String(),
@@ -44,6 +50,8 @@ class StrategyConfigModel {
         name: json['name'] as String,
         paperTrading: json['paperTrading'] as bool? ?? true,
         enabled: json['enabled'] as bool? ?? true,
+        reminderEnabled: json['reminderEnabled'] as bool? ?? false,
+        reminderMinutesBefore: json['reminderMinutesBefore'] as int? ?? 60,
         params: Map<String, dynamic>.from(json['params'] as Map),
         securityIds:
             (json['securityIds'] as List<dynamic>).map((e) => e as int).toList(),
@@ -55,6 +63,8 @@ class StrategyConfigModel {
     String? name,
     bool? paperTrading,
     bool? enabled,
+    bool? reminderEnabled,
+    int? reminderMinutesBefore,
     Map<String, dynamic>? params,
     List<int>? securityIds,
   }) =>
@@ -64,6 +74,9 @@ class StrategyConfigModel {
         name: name ?? this.name,
         paperTrading: paperTrading ?? this.paperTrading,
         enabled: enabled ?? this.enabled,
+        reminderEnabled: reminderEnabled ?? this.reminderEnabled,
+        reminderMinutesBefore:
+            reminderMinutesBefore ?? this.reminderMinutesBefore,
         params: params ?? Map<String, dynamic>.from(this.params),
         securityIds: securityIds ?? List<int>.from(this.securityIds),
         createdAt: createdAt,

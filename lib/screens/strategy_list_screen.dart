@@ -5,6 +5,7 @@ import '../services/app_logger.dart';
 import '../services/scrip_service.dart';
 import '../services/storage_service.dart';
 import '../services/strategy_background_service.dart';
+import '../services/strategy_reminder_service.dart';
 import '../strategies/base_strategy.dart';
 import '../strategies/strategy_registry.dart';
 import 'backtest_config_screen.dart';
@@ -56,6 +57,8 @@ class _StrategyListScreenState extends State<StrategyListScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _checkServiceRunning();
+    } else if (state == AppLifecycleState.paused) {
+      StrategyBackgroundService.flushNow();
     }
   }
 
@@ -259,6 +262,13 @@ class _StrategyListScreenState extends State<StrategyListScreen>
         }
       });
       await _save();
+
+      // Sync the reminder for this config — schedule if enabled, else cancel.
+      if (result.reminderEnabled) {
+        await StrategyReminderService.scheduleReminder(result);
+      } else {
+        await StrategyReminderService.cancelReminder(result.id);
+      }
     }
   }
 
@@ -295,6 +305,7 @@ class _StrategyListScreenState extends State<StrategyListScreen>
     );
 
     if (confirmed == true && mounted) {
+      await StrategyReminderService.cancelReminder(config.id);
       setState(() {
         _configs.removeWhere((c) => c.id == config.id);
         _runningStates.remove(config.id);
@@ -512,6 +523,12 @@ class _StrategyListScreenState extends State<StrategyListScreen>
                                   'SL ₹${((config.params['fixedStopLoss'] as num?) ?? 500).toStringAsFixed(0)}',
                                   Colors.red,
                                 ),
+                                if (config.reminderEnabled &&
+                                    config.reminderMinutesBefore > 0)
+                                  _badge(
+                                    '🔔 ${_reminderClock(config.reminderMinutesBefore)}',
+                                    Colors.purple,
+                                  ),
                               ],
                             ),
                           ],
@@ -627,6 +644,15 @@ class _StrategyListScreenState extends State<StrategyListScreen>
         );
       },
     );
+  }
+
+  String _reminderClock(int minutesBefore) {
+    final mod = (9 * 60 + 15) - minutesBefore;
+    final h24 = mod ~/ 60;
+    final m = mod % 60;
+    final period = h24 >= 12 ? 'PM' : 'AM';
+    final h12 = h24 == 0 ? 12 : (h24 > 12 ? h24 - 12 : h24);
+    return '$h12:${m.toString().padLeft(2, '0')} $period';
   }
 
   Widget _badge(String text, Color color) {

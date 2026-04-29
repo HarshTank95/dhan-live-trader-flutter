@@ -44,6 +44,7 @@ class StrategyEngine {
   final List<StrategySignalModel> _activeSignals = [];
   final List<StrategyTradeModel> _trades = [];
   final Set<int> _alreadySignalled = {};
+  int _totalSignalsGenerated = 0;
   Map<int, List<Candle>> _todayCandles = {};
   final Map<int, double> _dayOpenPrices = {};
   int _tradesPlacedToday = 0;
@@ -450,10 +451,11 @@ class StrategyEngine {
 
     for (final signal in signals) {
       _alreadySignalled.add(signal.securityId);
+      _totalSignalsGenerated++;
       final sigTime = '${signal.timestamp.hour.toString().padLeft(2, '0')}:${signal.timestamp.minute.toString().padLeft(2, '0')}';
       final expTime = '${signal.expiryTime.hour.toString().padLeft(2, '0')}:${signal.expiryTime.minute.toString().padLeft(2, '0')}';
-      _log('Engine', 'DOMINANCE FOUND: ${signal.symbol} Entry=${signal.entryPrice} SL=${signal.stopLoss} Window=$sigTime→$expTime');
-      _addKeyEvent('DOMINANCE: ${signal.symbol} Entry=${signal.entryPrice}');
+      _log('Engine', 'DOMINANCE FOUND: ${signal.symbol} Break=${signal.entryPrice} SL=${signal.stopLoss} Window=$sigTime→$expTime');
+      _addKeyEvent('DOMINANCE: ${signal.symbol} Break=${signal.entryPrice}');
 
       _sendUpdate('signal_found', {
         'symbol': signal.symbol,
@@ -810,7 +812,7 @@ class StrategyEngine {
         paperTrading: config.paperTrading,
         totalStocks: _securityIds.length,
         finalActiveStocks: _stockMetrics.length,
-        dominanceCandidates: _alreadySignalled.length,
+        dominanceCandidates: _totalSignalsGenerated,
         totalTrades: _trades.length,
         winners: winners,
         losers: losers,
