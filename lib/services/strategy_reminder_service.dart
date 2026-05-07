@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -10,6 +11,7 @@ import '../screens/strategy_dashboard_screen.dart';
 import '../screens/token_entry_screen.dart';
 import 'app_logger.dart';
 import 'storage_service.dart';
+import 'strategy_background_service.dart';
 
 /// Per-strategy pre-market reminder notifications.
 ///
@@ -24,6 +26,11 @@ class StrategyReminderService {
   static const _channelName = 'Strategy Reminders';
   static const _channelDesc =
       'Pre-market reminders to start your trading strategies';
+
+  /// Action ID for the "Start Now" button on the reminder notification.
+  /// When the user taps it, the tap handler starts the strategy in addition
+  /// to opening the dashboard.
+  static const _actionStartNow = 'start_now';
 
   /// Market open is 9:15 AM IST — the same hardcoded constant used elsewhere
   /// in the codebase. Reminder fires at `_marketOpenMinutes - leadMinutes`.
@@ -113,6 +120,14 @@ class StrategyReminderService {
               importance: Importance.high,
               priority: Priority.high,
               category: AndroidNotificationCategory.reminder,
+              actions: const [
+                AndroidNotificationAction(
+                  _actionStartNow,
+                  'Start Now',
+                  showsUserInterface: true,
+                  cancelNotification: true,
+                ),
+              ],
             ),
           ),
           androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
@@ -172,7 +187,7 @@ class StrategyReminderService {
       await _plugin.show(
         _baseId(config.id) + 5, // +5 keeps it clear of the 5 weekday slots
         'Test reminder: ${config.name}',
-        'Reminder pipeline is working ($mode) — tap to open',
+        'Reminder pipeline is working ($mode) — tap to open or Start Now',
         NotificationDetails(
           android: AndroidNotificationDetails(
             _channelId,
@@ -181,6 +196,14 @@ class StrategyReminderService {
             importance: Importance.high,
             priority: Priority.high,
             category: AndroidNotificationCategory.reminder,
+            actions: const [
+              AndroidNotificationAction(
+                _actionStartNow,
+                'Start Now',
+                showsUserInterface: true,
+                cancelNotification: true,
+              ),
+            ],
           ),
         ),
         payload: jsonEncode({'type': 'reminder', 'configId': config.id}),
@@ -252,7 +275,10 @@ class StrategyReminderService {
 
   /// Notification tap handler — runs on the main isolate. Decodes the
   /// payload and pushes the strategy dashboard, or routes to the token
-  /// entry screen if credentials aren't saved yet.
+  /// entry screen if credentials aren't saved yet. If the user tapped the
+  /// "Start Now" action, also kicks off the foreground service before
+  /// navigating so the strategy is already running by the time the
+  /// dashboard appears.
   static Future<void> _onNotificationTap(NotificationResponse response) async {
     final payload = response.payload;
     if (payload == null || payload.isEmpty) return;
@@ -284,6 +310,18 @@ class StrategyReminderService {
       return;
     }
 
+    // If the user tapped "Start Now", launch the strategy before navigating.
+    // We don't block navigation on the result — the dashboard subscribes to
+    // the activity stream and will reflect the running state once it's up.
+    if (response.actionId == _actionStartNow) {
+      if (!config.enabled) {
+        AppLogger.info('Reminder',
+            'Start Now ignored — ${config.name} is paused (enabled=false)');
+      } else {
+        unawaited(_startStrategyFromReminder(config, creds));
+      }
+    }
+
     navState.push(MaterialPageRoute(
       builder: (_) => StrategyDashboardScreen(
         config: config,
@@ -291,5 +329,26 @@ class StrategyReminderService {
         accessToken: creds.accessToken,
       ),
     ));
+  }
+
+  static Future<void> _startStrategyFromReminder(
+    StrategyConfigModel config,
+    ({String clientId, String accessToken}) creds,
+  ) async {
+    try {
+      final started = await StrategyBackgroundService.startService(
+        configId: config.id,
+        strategyType: config.strategyType,
+        configName: config.name,
+        isPaper: config.paperTrading,
+        clientId: creds.clientId,
+        accessToken: creds.accessToken,
+        configJson: config.toJson(),
+      );
+      AppLogger.info(
+          'Reminder', 'Start Now → service started=$started for ${config.name}');
+    } catch (e) {
+      AppLogger.error('Reminder', 'Start Now failed: $e');
+    }
   }
 }
