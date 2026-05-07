@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/strategy_config_model.dart';
 import '../services/scrip_service.dart';
+import '../services/strategy_reminder_service.dart';
 import '../strategies/base_strategy.dart';
 import '../strategies/strategy_registry.dart';
 
@@ -43,6 +44,52 @@ class _StrategyConfigScreenState extends State<StrategyConfigScreen> {
         : _nameCtrl.text.trim();
     _config.updatedAt = DateTime.now();
     Navigator.pop(context, _config);
+  }
+
+  Future<void> _onReminderToggle(bool v) async {
+    if (!v) {
+      setState(() => _config.reminderEnabled = false);
+      return;
+    }
+    // Request POST_NOTIFICATIONS before flipping the switch — declaring it in
+    // the manifest is not enough on Android 13+; without runtime grant the
+    // OS silently drops every scheduled reminder.
+    final granted = await StrategyReminderService.requestPermission();
+    if (!mounted) return;
+    if (granted) {
+      setState(() => _config.reminderEnabled = true);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              'Notifications blocked — enable them in system settings, then try again.'),
+          duration: Duration(seconds: 4),
+        ),
+      );
+    }
+  }
+
+  Future<void> _sendTestReminder() async {
+    final granted = await StrategyReminderService.requestPermission();
+    if (!mounted) return;
+    if (!granted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              'Notifications blocked — enable them in system settings, then try again.'),
+          duration: Duration(seconds: 4),
+        ),
+      );
+      return;
+    }
+    await StrategyReminderService.sendTestNotification(_config);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Test notification sent — check your notification tray.'),
+        duration: Duration(seconds: 3),
+      ),
+    );
   }
 
   @override
@@ -288,8 +335,7 @@ class _StrategyConfigScreenState extends State<StrategyConfigScreen> {
               color: _config.reminderEnabled ? Colors.purple : Colors.grey,
             ),
             value: _config.reminderEnabled,
-            onChanged: (v) =>
-                setState(() => _config.reminderEnabled = v),
+            onChanged: (v) => _onReminderToggle(v),
           ),
           if (_config.reminderEnabled) ...[
             const Divider(height: 1),
@@ -319,7 +365,7 @@ class _StrategyConfigScreenState extends State<StrategyConfigScreen> {
                   () => _config.reminderMinutesBefore = v.round()),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
               child: Row(
                 children: [
                   const Icon(Icons.schedule, size: 14, color: Colors.purple),
@@ -332,6 +378,21 @@ class _StrategyConfigScreenState extends State<StrategyConfigScreen> {
                         fontWeight: FontWeight.w600),
                   ),
                 ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: _sendTestReminder,
+                  icon: const Icon(Icons.notifications_active, size: 16),
+                  label: const Text('Send test now'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.purple,
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
               ),
             ),
           ],

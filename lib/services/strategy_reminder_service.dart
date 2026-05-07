@@ -143,6 +143,54 @@ class StrategyReminderService {
     }
   }
 
+  /// Request POST_NOTIFICATIONS at runtime (Android 13+). Required before any
+  /// scheduled notification will actually appear — declaring it in the
+  /// manifest is not enough. Returns true if granted (or N/A on this OS).
+  static Future<bool> requestPermission() async {
+    if (!_initialized) return false;
+    try {
+      final android = _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      if (android == null) return true;
+      final granted = await android.requestNotificationsPermission();
+      AppLogger.info('Reminder', 'Notification permission: ${granted ?? false}');
+      return granted ?? false;
+    } catch (e) {
+      debugPrint('[Reminder] requestPermission failed: $e');
+      return false;
+    }
+  }
+
+  /// Fire a one-shot notification immediately so the user can verify the
+  /// reminder pipeline end-to-end without waiting until tomorrow morning.
+  /// Uses the same channel as scheduled reminders so per-channel mute state
+  /// is exercised too.
+  static Future<void> sendTestNotification(StrategyConfigModel config) async {
+    if (!_initialized) return;
+    try {
+      final mode = config.paperTrading ? 'Paper' : 'Live';
+      await _plugin.show(
+        _baseId(config.id) + 5, // +5 keeps it clear of the 5 weekday slots
+        'Test reminder: ${config.name}',
+        'Reminder pipeline is working ($mode) — tap to open',
+        NotificationDetails(
+          android: AndroidNotificationDetails(
+            _channelId,
+            _channelName,
+            channelDescription: _channelDesc,
+            importance: Importance.high,
+            priority: Priority.high,
+            category: AndroidNotificationCategory.reminder,
+          ),
+        ),
+        payload: jsonEncode({'type': 'reminder', 'configId': config.id}),
+      );
+      AppLogger.info('Reminder', 'Test notification fired for ${config.name}');
+    } catch (e) {
+      debugPrint('[Reminder] sendTestNotification failed: $e');
+    }
+  }
+
   /// Cancel everything and re-schedule reminders for every enabled config.
   /// Idempotent. Call on app startup so reminders survive cold starts and
   /// reboots without piling up duplicates.
