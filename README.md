@@ -163,14 +163,17 @@ Default: Risk INR 500, Target INR 2000 per trade, max 2 trades/day.
 - **Per-strategy reminder notifications** so you don't forget to start a strategy before market open
 - Configurable lead time **5–180 min** (default 60) via slider on the strategy config screen
 - Fires **Mon–Fri only** at `9:15 AM IST − leadMinutes` (e.g. lead 60 → 8:15 AM)
-- **Tap the notification → strategy dashboard opens** directly (token-entry screen if you're logged out)
+- **POST_NOTIFICATIONS prompt on toggle ON** — the runtime permission is requested the moment you flip the switch; if the user denies, the toggle stays OFF and a SnackBar explains how to fix it. Without this prompt the OS silently drops every scheduled notification on Android 13+
+- **"Send test now" button** under the lead-time slider — fires a one-shot notification through the same channel so you can verify the pipeline end-to-end without waiting until tomorrow morning
+- **"Start Now" action button on the notification** — tap the action and the strategy's foreground service starts immediately, then the dashboard opens with the engine already running. Same gates as the in-app START (skipped if the strategy is paused; routes to login if logged out)
+- **Tap the notification body → strategy dashboard opens** directly (token-entry screen if you're logged out)
 - Reminder badge `🔔 8:15 AM` shown on the strategy card when enabled
 - Survives **reboot** via `RECEIVE_BOOT_COMPLETED` and `flutter_local_notifications` boot receiver
 - Re-armed automatically on app cold-start via `StrategyReminderService.syncAllReminders()`
 - Auto-cancels when the strategy is deleted or the reminder toggle is turned off
 - Uses `AndroidScheduleMode.inexactAllowWhileIdle` — no `SCHEDULE_EXACT_ALARM` permission prompt; ~minute-level accuracy is fine for a reminder
 - Hardcoded `Asia/Kolkata` timezone (NSE is IST, no DST), via `timezone` package
-- Notification IDs derived deterministically from `configId` (5 weekday slots per strategy, base = `100000 + (configId.hashCode & 0xFFFF)`) so re-syncing is idempotent
+- Notification IDs derived deterministically from `configId` (5 weekday slots per strategy, base = `100000 + (configId.hashCode & 0xFFFF)`); test notification uses `base + 5` so it never collides with the weekday slots
 
 ### Background Service (Foreground Service)
 - Strategy runs even when **phone is locked or app is minimized**
@@ -615,6 +618,10 @@ Screening window ends → auto-stop → show results
 
 **Problem:** `Break ▲2870.6  SL: 362.1` was too long to fit on one line in the 140px-wide candidate card, causing SL to wrap to the next line and pushing the time/status row off the card. **Fix:** Split into two separate `Text` widgets (`Break ▲<price>` and `SL: <price>` on individual lines). Bumped candidate ListView height 92→106px to accommodate the extra line without clipping.
 
+### 28. Reminder Notifications Silently Dropped After Toggling On
+
+**Problem:** Enabling the per-strategy reminder toggle and saving the config produced no notification at the scheduled time — the schedule was registered with `flutter_local_notifications` but nothing ever appeared in the tray. **Root cause:** `POST_NOTIFICATIONS` (Android 13+) was only requested from `StrategyBackgroundService.startService()` — i.e., only when the user pressed START. If the user enabled the reminder without ever starting a strategy on that device, the OS had never granted the permission, so every `_plugin.zonedSchedule()` fired into a black hole. **Fix:** added `StrategyReminderService.requestPermission()` and call it from the config screen's toggle `onChanged` — the runtime prompt now appears the instant the user flips the switch ON, and if denied the toggle stays OFF with a SnackBar explanation. Also added a `sendTestNotification()` helper + "Send test now" button under the lead-time slider so the pipeline is verifiable without waiting until tomorrow morning.
+
 ### 26. Phase / Candidates / Status Lost on Widget Rebuild
 **Problem:** Same shape as #22 but for `_currentPhase`, `_statusMessage`, `_progress`, `_candidateCount`, `_activeStocks`, and the `_candidates` list — all reset to zero/empty after navigating back into the dashboard mid-run. Phase indicator jumped back to "Load", candidate strip was empty, status said "Ready to start", etc. **Fix:** extended the central buffer concept to a `StrategySessionState` snapshot kept alongside the activity buffer, updated by the same `_wireActivityCapture()` listeners. Dashboard's `_seedFromBuffer()` reads it in `initState` and restores all six fields (candidate `Watching`/`Traded` status preserved). Snapshot resets on `status: 'running'` so each new run starts clean.
 
@@ -680,6 +687,9 @@ Screening window ends → auto-stop → show results
 - **Candidate / Trade card layout fix** — increased ListView heights (72→92, 80→96) and added bottom padding so cards no longer clip into the next section's header
 - **Candidate card Break/SL split** — `Break ▲` and `SL:` now on separate lines so long prices (e.g. 2870.6) never wrap; candidate ListView height bumped to 106px
 - **`effectiveCandidates` computed getter on `DailyRunSummaryModel`** — infers candidate count from `activityLog` when the saved `dominanceCandidates` is 0, fixing old history records without touching stored data
+- **Reminder permission prompt on enable** — `StrategyReminderService.requestPermission()` is invoked from the config screen's toggle so Android 13+ users actually get asked for `POST_NOTIFICATIONS`. Toggle refuses to flip on if denied. Fixes silent-drop bug where enabling reminders did nothing when the user had never started a strategy
+- **"Send test now" button on the reminder card** — `StrategyReminderService.sendTestNotification(config)` fires a one-shot notification through the same channel for end-to-end verification without waiting for the next weekday morning
+- **"Start Now" action button on reminder notifications** — `AndroidNotificationAction` with `showsUserInterface: true` added to both scheduled and test notifications. When tapped, `_onNotificationTap` branches on `actionId == 'start_now'` and calls `StrategyBackgroundService.startService()` before pushing the dashboard, giving one-tap auto-start at market open without the OEM-reliability/footgun risks of a fully-unattended background alarm
 
 ### Phase 6 (Next)
 - Live trading via Dhan Order API
