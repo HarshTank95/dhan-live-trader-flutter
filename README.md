@@ -266,6 +266,13 @@ Both engines log at identical decision points for side-by-side comparison:
 
 Live logs tagged as `[INFO] Engine:`, backtest as `[INFO] Backtest:` — both visible in **Drawer → View Logs**.
 
+### Diagnostic Logging (Live + Backtest)
+Both engines emit four structured diagnostic events designed to answer "why did this run produce zero signals":
+- **`SCAN [HH:MM] in=N window=M signals=K | R5=147 R6a=31 R7=18`** — per-slot scan summary. `in` = stocks that reached the rules, `window` = total candle-checks in the scan window, `signals` = how many passed, followed by top-3 reject rule counts. Lets you see at a glance which rule is killing everything.
+- **`PREMARKET: 499 loaded | avgVol p50=83k min=12 max=2.1M | bad(<1k)=8`** — pre-market data quality. Catches the case where a chunk of stocks have garbage averages that silently fail R5 (volume multiplier).
+- **`FETCH [HH:MM] latest=09:30 expected=09:30 clean=244 stale=4`** — candle freshness at fetch time. If `stale` is non-zero, Dhan's backend hadn't finalised the just-closed candle when we hit it.
+- **`WHY ZERO: 7 scan slots × 248 stocks avg = 1736 candle-checks. Dominant reject: R5-VolMult (1247×, 71%). Likely cause: ...`** — end-of-day diagnosis only when a run/day produced 0 signals. Strategy-specific hints come from `BaseStrategy.diagnosisHint(rule)`.
+
 ---
 
 ## Paper Trading
@@ -313,17 +320,36 @@ Swipe to confirm → Margin returned + P&L settled
 
 ## App Logging
 
-File-based logger for debugging on device.
+Two-tier on-device logging system for debugging.
 
-- Logs written to `app_log.txt` on device storage
+### Tier 1 — General app log (`app_log.txt`)
+- Rolling file written to app docs dir
 - Levels: INFO, WARN, ERROR, STRAT (strategy), TRADE
 - Includes timestamps, tags, and full stack traces on errors
-- **Drawer → View Logs** opens the log viewer screen
-- Filter by level (quick chips) or free text search
-- **Copy** button to clipboard (copies filtered logs)
-- **Share/Export** button — writes logs to a timestamped `.txt` file and opens Android share sheet (send via WhatsApp, email, save to files, etc.)
-- Auto-trims log file at 500KB to prevent storage bloat
+- Auto-trims at 500 KB / 5000 lines to prevent storage bloat
 - Catches uncaught Flutter errors via `FlutterError.onError`
+
+### Tier 2 — Per-run structured logs (JSONL)
+Each live engine run AND each backtest run gets its own structured log file under `{appDocs}/strategy_logs/{runId}.jsonl` plus a `.meta.json` sidecar. Forensic-grade — survives even after `app_log.txt` rolls past it.
+
+- JSONL line format: `{"t":"ISO8601","lvl":"info|warn|error","tag":"Engine|Scan|Fetch|...","msg":"...","data":{...}}`
+- `data` is a free-form `Map<String, dynamic>` — strategies can attach any structured payload (reject counts, candle data, API status) without schema changes
+- `kind: 'live' | 'backtest'` in the meta distinguishes the two — surfaced as a coloured chip in the Runs tab
+- Configurable retention (7 / 14 / 30 / 60 days, default 14) via the Runs tab timer icon; sweep runs on app start
+- `RunLogger` service (`lib/services/run_logger.dart`) handles file I/O, listing, retention, share/export
+
+### Log Viewer (Drawer → View Logs)
+Two tabs:
+- **App** — flat rolling `app_log.txt` view with level chips, filter, copy, share. Unchanged behavior from before.
+- **Runs** — list of per-run logs (date, config, Paper/Live/Backtest chip, stocks/signals/trades/P&L). Tap a row → opens `RunLogDetailScreen` with:
+  - Tag chips **auto-derived from events** in the loaded run (frequency-sorted) — any new strategy emitting its own tag (e.g. `MeanReversion`) gets a first-class chip with no code changes
+  - Level filter (Info+ / Warn+ / Error)
+  - Search box
+  - Share button → exports just that run's JSONL via Android share sheet
+- Retention picker + Delete-all sweep
+
+### "View full logs" from history
+Each entry in **Strategy → Run History** has a "View full logs" button that deep-links into the run's JSONL viewer — even weeks later, you can replay any past run with full structured detail.
 
 ---
 
@@ -361,7 +387,8 @@ lib/
 │   ├── backtest_config_screen.dart        # Backtest setup: date range, universe, params, API estimate
 │   ├── backtest_progress_screen.dart      # Backtest download progress with cancel support
 │   ├── backtest_results_screen.dart       # Backtest results: summary, daily chart, trades with entry/exit times
-│   ├── log_viewer_screen.dart             # On-device log viewer with filter, copy, and share/export
+│   ├── log_viewer_screen.dart             # Two-tab log viewer: App log + Runs (per-run JSONL list)
+│   ├── run_log_detail_screen.dart         # Single-run JSONL viewer with dynamic tag chips + filters
 │   ├── paper_order_screen.dart            # Paper trading order bottom sheet (Market/Limit, swipe confirm)
 │   └── paper_positions_screen.dart        # Paper positions, day P&L, trade history
 │
@@ -373,6 +400,7 @@ lib/
 │   ├── candle_repository.dart             # Historical candle download with caching and progress
 │   ├── storage_service.dart               # SharedPreferences: credentials, watchlists, theme, configs, trades, active strategy
 │   ├── app_logger.dart                    # File-based logger with memory buffer
+│   ├── run_logger.dart                    # Per-run structured logger (JSONL + meta.json, retention sweep)
 │   ├── strategy_background_service.dart   # Android foreground service for background strategy execution
 │   ├── strategy_reminder_service.dart      # Per-strategy pre-market reminder notifications (Mon–Fri, IST)
 │   ├── strategy_engine.dart               # Live strategy execution engine (runs in background isolate)
@@ -622,6 +650,17 @@ Screening window ends → auto-stop → show results
 
 **Problem:** Enabling the per-strategy reminder toggle and saving the config produced no notification at the scheduled time — the schedule was registered with `flutter_local_notifications` but nothing ever appeared in the tray. **Root cause:** `POST_NOTIFICATIONS` (Android 13+) was only requested from `StrategyBackgroundService.startService()` — i.e., only when the user pressed START. If the user enabled the reminder without ever starting a strategy on that device, the OS had never granted the permission, so every `_plugin.zonedSchedule()` fired into a black hole. **Fix:** added `StrategyReminderService.requestPermission()` and call it from the config screen's toggle `onChanged` — the runtime prompt now appears the instant the user flips the switch ON, and if denied the toggle stays OFF with a SnackBar explanation. Also added a `sendTestNotification()` helper + "Send test now" button under the lead-time slider so the pipeline is verifiable without waiting until tomorrow morning.
 
+### 29. Live Strategy Returns 0 Candidates While Backtest Finds 13–27
+
+**Problem:** Backtesting the dominance strategy on April 28 → May 12 produced 13–27 dominance signals per day with multiple trades, but **live runs over the exact same days returned 0 candidates almost every day**. With only the flat `app_log.txt` rolling 500 KB / 5000 lines, by the time the user noticed the issue the relevant scan-time logs had already been overwritten — making forensic root-cause work impossible. **Root cause analysis (hypothesised):** the live engine's 5-second buffer after each screen time means the just-closed 5-min candle is fetched while Dhan's backend hasn't yet finalised its OHLCV — so R5 (volume ≥ 2× average) and R6a (absolute volume ≥ 5000) reject every candidate on partial data. The backtest reads the same candle from SQLite cache long after it finalised. **Fix:** rather than guess, built proper diagnostics so the next 0-candidate run is self-evident:
+- **`SCAN [HH:MM] in=N window=M signals=K | R5=147 R6a=31 ...`** per-slot summary — shows exactly which rule killed everything at each slot. Lives in both the activity log (history detail sheet) and the run JSONL.
+- **`PREMARKET: 499 loaded | avgVol p50=83k min=12 max=2.1M | bad(<1k)=8`** at the end of pre-market load — catches broken averages that would silently fail R5.
+- **`FETCH [HH:MM] latest=09:30 expected=09:30 clean=244 stale=4`** before each scan — flags when Dhan's backend lags the just-closed candle.
+- **`WHY ZERO: 7 slots × 248 stocks avg = 1736 checks. Dominant reject: R5-VolMult (1247×, 71%). Likely cause: ...`** end-of-day diagnostic, only when 0 signals. Per-rule hints come from `BaseStrategy.diagnosisHint(rule)` so each strategy ships its own vocabulary.
+- **`RunLogger` service** writes per-run JSONL files (`{appDocs}/strategy_logs/{runId}.jsonl`) so logs survive forever instead of rolling past. Backtests get their own JSONL too with `kind: 'backtest'` in the meta.
+- **Log Viewer rebuilt** with App + Runs tabs; "View full logs" deep-links from each history card. Tag chips auto-derived from loaded events so new strategies get filter chips for free.
+- **Retention sweep** (7 / 14 / 30 / 60 days, default 14) runs on app start.
+
 ### 26. Phase / Candidates / Status Lost on Widget Rebuild
 **Problem:** Same shape as #22 but for `_currentPhase`, `_statusMessage`, `_progress`, `_candidateCount`, `_activeStocks`, and the `_candidates` list — all reset to zero/empty after navigating back into the dashboard mid-run. Phase indicator jumped back to "Load", candidate strip was empty, status said "Ready to start", etc. **Fix:** extended the central buffer concept to a `StrategySessionState` snapshot kept alongside the activity buffer, updated by the same `_wireActivityCapture()` listeners. Dashboard's `_seedFromBuffer()` reads it in `initState` and restores all six fields (candidate `Watching`/`Traded` status preserved). Snapshot resets on `status: 'running'` so each new run starts clean.
 
@@ -690,6 +729,11 @@ Screening window ends → auto-stop → show results
 - **Reminder permission prompt on enable** — `StrategyReminderService.requestPermission()` is invoked from the config screen's toggle so Android 13+ users actually get asked for `POST_NOTIFICATIONS`. Toggle refuses to flip on if denied. Fixes silent-drop bug where enabling reminders did nothing when the user had never started a strategy
 - **"Send test now" button on the reminder card** — `StrategyReminderService.sendTestNotification(config)` fires a one-shot notification through the same channel for end-to-end verification without waiting for the next weekday morning
 - **"Start Now" action button on reminder notifications** — `AndroidNotificationAction` with `showsUserInterface: true` added to both scheduled and test notifications. When tapped, `_onNotificationTap` branches on `actionId == 'start_now'` and calls `StrategyBackgroundService.startService()` before pushing the dashboard, giving one-tap auto-start at market open without the OEM-reliability/footgun risks of a fully-unattended background alarm
+- **Per-run structured logging infrastructure** — new `RunLogger` service writes JSONL files under `{appDocs}/strategy_logs/` for both live runs and backtests. Each event has `{t, lvl, tag, msg, data?}` where `data` is a free-form structured payload (reject counts, candle data, etc.) so new strategies plug in with zero schema changes. Retention sweep (default 14 days) runs on app start; configurable from the Runs tab. Survives the rolling 500 KB `app_log.txt` cap so old runs stay debuggable forever
+- **`SCAN` / `PREMARKET` / `FETCH` / `WHY ZERO` diagnostic events** — four structured log lines emitted by both `StrategyEngine` and `BacktestEngine` to answer "why did this run produce 0 signals" without guesswork. The end-of-day `WHY ZERO` line names the dominant reject rule with a strategy-supplied hint (R5-VolMult → "Volume < 2×avg — quiet session OR partial-candle data at fetch time")
+- **`BaseStrategy.diagnosisHint(rule)`** — per-strategy hint vocabulary. Default returns null; `DominanceBreakoutStrategy` overrides with the 8 R1–R8 explanations. Future strategies (mean-reversion, gap-fade) ship their own hint maps without touching the engine
+- **`ScanReport` callback on `strategy.scan()`** — strategies now emit structured `{stocksEvaluated, candlesInWindow, rejectCounts}` alongside the signal list. Both engines aggregate the rejects across slots so the WHY ZERO line can identify the top blocker without parsing log strings
+- **Two-tab Log Viewer + per-run detail screen** — `LogViewerScreen` rebuilt with App (existing flat `app_log.txt`) and Runs (per-run JSONL list with kind/Paper/Live/Backtest chips) tabs. `RunLogDetailScreen` shows one run's events with dynamic tag chips (auto-derived from loaded events, frequency-sorted), Info/Warn/Error level filters, search, and share-as-JSONL. Each history card gets a "View full logs" button that deep-links into the corresponding run
 
 ### Phase 6 (Next)
 - Live trading via Dhan Order API

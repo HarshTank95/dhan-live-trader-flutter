@@ -13,8 +13,10 @@ import '../models/strategy_signal_model.dart';
 import '../models/strategy_trade_model.dart';
 import '../services/app_logger.dart';
 import '../services/rate_limiter.dart';
+import '../services/run_logger.dart';
 import '../services/scrip_service.dart';
 import '../services/storage_service.dart';
+import '../strategies/base_strategy.dart';
 import '../strategies/dominance_breakout_strategy.dart';
 
 /// Callback to send status updates back to the UI (via background service).
@@ -48,10 +50,26 @@ class StrategyEngine {
   Map<int, List<Candle>> _todayCandles = {};
   final Map<int, double> _dayOpenPrices = {};
   int _tradesPlacedToday = 0;
+  // Aggregate scan diagnostics across all slots so the end-of-day "WHY ZERO"
+  // line can pinpoint the dominant rejection cause without us reading every
+  // per-slot SCAN event.
+  int _totalScanSlots = 0;
+  int _totalStocksEvaluated = 0;
+  int _totalCandlesEvaluated = 0;
+  final Map<String, int> _aggregateRejects = {};
   bool _running = false;
   bool _stopRequested = false;
   String _startTime = '';
+  // Cap raised from 50 → 100: per-slot SCAN diagnostics fill the log faster
+  // than the legacy event mix and the history sheet needs room to display
+  // them alongside trades/exits.
+  static const int _maxKeyEvents = 100;
   final List<String> _keyEvents = [];
+
+  // Per-run structured logger; opened in run(), closed in finally block.
+  RunLoggerSession? _runLog;
+  String? _runId;
+  String? _runDate;
 
   // Nifty 500 security IDs loaded from scrip master
   List<int> _securityIds = [];
@@ -81,10 +99,27 @@ class StrategyEngine {
       // Initialize file logger in background isolate
       await AppLogger.init();
 
+      // Open a per-run structured log file under {appDocs}/strategy_logs/.
+      // Each run gets its own JSONL so the Log Viewer can show forensic
+      // detail for any past run even after app_log.txt rolls.
+      _runDate =
+          '${now.year}-${now.month.toString().padLeft(2, "0")}-${now.day.toString().padLeft(2, "0")}';
+      _runId = RunLogger.makeRunId(_runDate!, config.id);
+      _runLog = await RunLogger.startRun(
+        runId: _runId!,
+        date: _runDate!,
+        configId: config.id,
+        configName: config.name,
+        strategyType: config.strategyType,
+        paperTrading: config.paperTrading,
+        startTime: _startTime,
+      );
+
       _log('Engine', '═══ STRATEGY ENGINE STARTING ═══');
       _log('Engine', 'Strategy: ${config.name}');
       _log('Engine', 'Mode: ${config.paperTrading ? "PAPER" : "LIVE"}');
       _log('Engine', 'Config ID: ${config.id}');
+      _log('Engine', 'Run log: $_runId');
       _addKeyEvent('Engine started (${config.paperTrading ? "Paper" : "Live"})');
 
       _sendUpdate('phase', {'phase': 'loading', 'message': 'Loading instruments...'});
@@ -132,6 +167,21 @@ class StrategyEngine {
       await _saveTrades();
       // Save daily run summary for history
       await _saveDailyRunSummary(endStatus);
+      // Close per-run log file with final status + summary so the Runs tab
+      // can show counts without needing to parse the JSONL.
+      final closeNow = DateTime.now();
+      final endTime =
+          '${closeNow.hour.toString().padLeft(2, "0")}:${closeNow.minute.toString().padLeft(2, "0")}:${closeNow.second.toString().padLeft(2, "0")}';
+      final totalPnl = _trades.fold<double>(0, (sum, t) => sum + t.pnl);
+      await _runLog?.close(
+        status: endStatus,
+        endTime: endTime,
+        signals: _totalSignalsGenerated,
+        trades: _trades.length,
+        totalStocks: _securityIds.length,
+        finalActiveStocks: _stockMetrics.length,
+        totalPnl: totalPnl,
+      );
     }
   }
 
@@ -236,6 +286,39 @@ class StrategyEngine {
 
     // Remove security IDs that have no metrics
     _securityIds = _securityIds.where((id) => _stockMetrics.containsKey(id)).toList();
+
+    // ── PREMARKET QUALITY summary ─────────────────────────────────────────
+    // If a chunk of stocks have garbage averages (avgVol == 0 or tiny), the
+    // dominance rules will silently reject every one. Surfacing this in
+    // both the activity log and the run JSONL makes that case obvious.
+    if (_stockMetrics.isNotEmpty) {
+      final vols = _stockMetrics.values.map((m) => m.avgVolume).toList()
+        ..sort();
+      final minVol = vols.first;
+      final maxVol = vols.last;
+      final p50 = vols[vols.length ~/ 2];
+      final badZero = vols.where((v) => v == 0).length;
+      final badLow = vols.where((v) => v > 0 && v < 1000).length;
+
+      final summary =
+          'PREMARKET: ${_stockMetrics.length} loaded | avgVol p50=${_fmtVol(p50)} min=${_fmtVol(minVol)} max=${_fmtVol(maxVol)} | bad(avgVol<1k)=$badLow | bad(=0)=$badZero';
+      _log('Engine', summary);
+      _addKeyEvent(summary);
+      _runLog?.info('PreMarket', 'Pre-market data quality', {
+        'loaded': _stockMetrics.length,
+        'avgVol_p50': p50,
+        'avgVol_min': minVol,
+        'avgVol_max': maxVol,
+        'badLowVol': badLow,
+        'badZeroVol': badZero,
+      });
+    }
+  }
+
+  String _fmtVol(double v) {
+    if (v >= 1e6) return '${(v / 1e6).toStringAsFixed(1)}M';
+    if (v >= 1e3) return '${(v / 1e3).toStringAsFixed(0)}k';
+    return v.toStringAsFixed(0);
   }
 
   Future<CandleStatsModel?> _loadStockMetrics(int secId, String symbol, int days) async {
@@ -356,6 +439,12 @@ class StrategyEngine {
       int elimLowVol = 0;
       int elimApiErr = 0;
       final toRemove = <int>[];
+      // Track the most-recent candle time across all stocks fetched this slot.
+      // If "latest" lags behind the expected just-closed candle by more than
+      // one bar, Dhan's backend hasn't finalised the bar yet — the dominance
+      // rules will likely reject it on partial volume.
+      int? latestCandleMinute;
+      final staleHistogram = <int, int>{}; // minutes-of-day → count
 
       for (final secId in activeIds) {
         if (_stopRequested) return;
@@ -378,6 +467,12 @@ class StrategyEngine {
 
           // Volume filter: latest candle must have >= minAbsoluteVolume
           final latestCandle = _todayCandles[secId]!.last;
+          final latestMin =
+              latestCandle.date.hour * 60 + latestCandle.date.minute;
+          staleHistogram[latestMin] = (staleHistogram[latestMin] ?? 0) + 1;
+          if (latestCandleMinute == null || latestMin > latestCandleMinute) {
+            latestCandleMinute = latestMin;
+          }
           if (latestCandle.volume < minAbsoluteVolume) {
             toRemove.add(secId);
             elimLowVol++;
@@ -386,6 +481,32 @@ class StrategyEngine {
           toRemove.add(secId);
           elimApiErr++;
         }
+      }
+
+      // ── FETCH freshness diagnostic (file log only — too noisy for activity)
+      if (latestCandleMinute != null) {
+        // Expected: the candle that just closed = screenTime - scanInterval.
+        // At slot 9:35, expected latest = 9:30 candle (start time 9:30).
+        final expectedMin = screenTime.hour * 60 +
+            screenTime.minute -
+            scanInterval;
+        final stale = staleHistogram.entries
+            .where((e) => e.key < expectedMin)
+            .fold<int>(0, (sum, e) => sum + e.value);
+        final clean = staleHistogram[latestCandleMinute] ?? 0;
+        final freshness =
+            'FETCH [${screenTime.hour.toString().padLeft(2, "0")}:${screenTime.minute.toString().padLeft(2, "0")}] '
+            'latest=${(latestCandleMinute ~/ 60).toString().padLeft(2, "0")}:${(latestCandleMinute % 60).toString().padLeft(2, "0")} '
+            'expected=${(expectedMin ~/ 60).toString().padLeft(2, "0")}:${(expectedMin % 60).toString().padLeft(2, "0")} '
+            'clean=$clean stale=$stale';
+        _log('Engine', freshness);
+        _runLog?.info('Fetch', freshness, {
+          'slot': '${screenTime.hour.toString().padLeft(2, "0")}:${screenTime.minute.toString().padLeft(2, "0")}',
+          'latestCandleMin': latestCandleMinute,
+          'expectedMin': expectedMin,
+          'cleanStocks': clean,
+          'staleStocks': stale,
+        });
       }
 
       // Remove eliminated stocks and log summary
@@ -401,9 +522,11 @@ class StrategyEngine {
 
       // Screen for dominance candles (only from scanStartTime onwards, C#: 9:35)
       final screenTimeOfDay = Duration(hours: screenTime.hour, minutes: screenTime.minute);
+      final slotLabel =
+          '${screenTime.hour.toString().padLeft(2, "0")}:${screenTime.minute.toString().padLeft(2, "0")}';
       if (screenTimeOfDay >= scanStartTime) {
         _log('Engine', 'Screening for dominance candles...');
-        _screenForDominance();
+        _screenForDominance(slotLabel: slotLabel);
 
         _sendUpdate('update', {
           'status': 'running',
@@ -434,8 +557,9 @@ class StrategyEngine {
 
   // ── Dominance Candle Screening ────────────────────────────────────────
 
-  void _screenForDominance() {
+  void _screenForDominance({String? slotLabel}) {
     final strategy = DominanceBreakoutStrategy();
+    ScanReport? lastReport;
 
     final signals = strategy.scan(
       configId: config.id,
@@ -445,7 +569,38 @@ class StrategyEngine {
       scripService: _scripService,
       alreadySignalled: _alreadySignalled,
       debugLog: (msg) => _log('Scan', msg),
+      onScanReport: (report) => lastReport = report,
     );
+
+    // ── Per-slot structured SCAN summary ──────────────────────────────────
+    // The single most useful line for "why did this day produce 0 signals":
+    // it shows how many stocks even reached the rules and which rule killed
+    // them. Goes to both the activity log (compact summary in history view)
+    // and the run JSONL (full structured payload).
+    if (lastReport != null) {
+      final r = lastReport!;
+      _totalScanSlots++;
+      _totalStocksEvaluated += r.stocksEvaluated;
+      _totalCandlesEvaluated += r.candlesInWindow;
+      r.rejectCounts.forEach((rule, count) {
+        _aggregateRejects[rule] = (_aggregateRejects[rule] ?? 0) + count;
+      });
+      final topRej = r.topRejects(3).join(' ');
+      final tagLabel = slotLabel ?? 'now';
+      final compact =
+          'SCAN [$tagLabel] in=${r.stocksEvaluated} window=${r.candlesInWindow} signals=${signals.length}'
+          '${topRej.isEmpty ? "" : " | $topRej"}';
+      _log('Engine', compact);
+      _addKeyEvent(compact);
+      _runLog?.info('Scan', compact, {
+        'slot': slotLabel,
+        'stocksEvaluated': r.stocksEvaluated,
+        'candlesInWindow': r.candlesInWindow,
+        'signals': signals.length,
+        'rejectCounts': r.rejectCounts,
+        'totalRejects': r.totalRejects,
+      });
+    }
 
     final maxTrades = (config.params['maxTradesPerDay'] as num?)?.toInt() ?? 2;
 
@@ -754,7 +909,49 @@ class StrategyEngine {
     _log('Engine', 'Winners: $winners | Losers: $losers');
     _log('Engine', 'Total P&L: Rs ${totalPnl.toStringAsFixed(2)}');
     _log('Engine', '═══════════════════════════');
+
+    // ── WHY ZERO diagnostic ─────────────────────────────────────────────
+    // Emit a "why nothing fired" line in the activity log when a run ends
+    // with zero dominance candidates. This is the line a developer wants
+    // to see in history weeks later when troubleshooting a flat day.
+    if (_totalSignalsGenerated == 0 && _totalScanSlots > 0) {
+      final sortedRej = _aggregateRejects.entries.toList()
+        ..sort((a, b) => b.value.compareTo(a.value));
+      final totalRej =
+          _aggregateRejects.values.fold<int>(0, (sum, v) => sum + v);
+
+      String diagnosis;
+      if (_totalCandlesEvaluated == 0) {
+        diagnosis =
+            'No candles ever reached the scan window. Likely cause: scan window misconfigured OR Dhan API returned no fresh candles before each slot fired.';
+      } else if (sortedRej.isEmpty) {
+        diagnosis = 'Scan window had candles but no rejects recorded — internal logic gap, please review.';
+      } else {
+        final top = sortedRej.first;
+        final pct = totalRej > 0 ? (top.value * 100 / totalRej).round() : 0;
+        // Delegate the human-readable hint to the strategy itself so each
+        // strategy ships its own rule-key vocabulary.
+        final hint = DominanceBreakoutStrategy().diagnosisHint(top.key) ??
+            'See per-stock REJECT lines in run log for detail.';
+        diagnosis =
+            'Dominant reject: ${top.key} (${top.value}×, $pct%). $hint';
+      }
+
+      final summary =
+          'WHY ZERO: $_totalScanSlots scan slots × ${(_totalStocksEvaluated / _totalScanSlots).round()} stocks avg = $_totalCandlesEvaluated candle-checks. $diagnosis';
+      _log('Engine', summary);
+      _addKeyEvent(summary);
+      _runLog?.warn('Diagnosis', summary, {
+        'scanSlots': _totalScanSlots,
+        'avgStocksPerSlot': _totalScanSlots > 0
+            ? (_totalStocksEvaluated / _totalScanSlots).round()
+            : 0,
+        'candlesEvaluated': _totalCandlesEvaluated,
+        'aggregateRejects': _aggregateRejects,
+      });
+    }
   }
+
 
   // ── Save trades to SharedPreferences ──────────────────────────────────
 
@@ -788,8 +985,7 @@ class StrategyEngine {
     final now = DateTime.now();
     final ts = '${now.hour.toString().padLeft(2, "0")}:${now.minute.toString().padLeft(2, "0")}';
     _keyEvents.add('[$ts] $event');
-    // Keep max 50 events
-    if (_keyEvents.length > 50) _keyEvents.removeAt(0);
+    if (_keyEvents.length > _maxKeyEvents) _keyEvents.removeAt(0);
   }
 
   // ── Save Daily Run Summary ─────────────────────────────────────────
@@ -985,6 +1181,24 @@ class StrategyEngine {
         AppLogger.trade(msg);
       } else {
         AppLogger.info(tag, msg);
+      }
+    } catch (_) {}
+    // Mirror every engine line into the per-run JSONL so the run log is a
+    // complete forensic record. Structured payloads (SCAN, FETCH, WHY ZERO)
+    // emit their own _runLog entries with the `data` field — those calls
+    // intentionally remain alongside this mirror for richer detail.
+    try {
+      final level = msg.startsWith('ERROR') || msg.startsWith('FATAL')
+          ? 'error'
+          : msg.startsWith('WARN') || msg.startsWith('CRITICAL')
+              ? 'warn'
+              : 'info';
+      if (level == 'error') {
+        _runLog?.error(tag, msg);
+      } else if (level == 'warn') {
+        _runLog?.warn(tag, msg);
+      } else {
+        _runLog?.info(tag, msg);
       }
     } catch (_) {}
   }

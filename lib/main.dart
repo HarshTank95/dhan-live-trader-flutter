@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'screens/token_entry_screen.dart';
 import 'screens/ltp_screen.dart';
 import 'services/app_logger.dart';
+import 'services/run_logger.dart';
 import 'services/storage_service.dart';
 import 'services/strategy_background_service.dart';
 import 'services/strategy_reminder_service.dart';
@@ -50,6 +51,13 @@ void main() async {
     // Re-arm any saved reminders so they survive cold starts and reboots.
     final savedConfigs = await StorageService.loadStrategyConfigs();
     await StrategyReminderService.syncAllReminders(savedConfigs);
+
+    // Sweep per-run strategy logs older than retention window so the
+    // strategy_logs/ folder doesn't grow unbounded.
+    unawaited(() async {
+      final days = await StorageService.getLogRetentionDays();
+      await RunLogger.cleanup(retentionDays: days);
+    }());
 
     final saved = await StorageService.loadCredentials();
     final isDark = await StorageService.loadTheme();

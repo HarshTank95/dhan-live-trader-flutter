@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../models/daily_run_summary_model.dart';
+import '../services/run_logger.dart';
 import '../services/storage_service.dart';
+import 'run_log_detail_screen.dart';
 
 class StrategyHistoryScreen extends StatefulWidget {
   final String? configId; // if null, show all configs
@@ -266,7 +268,24 @@ class _StrategyHistoryScreenState extends State<StrategyHistoryScreen> {
                   '${run.paperTrading ? "Paper" : "Live"} | ${run.startTime} - ${run.endTime} | Status: ${run.status}',
                   style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 12),
+                // Deep-link to per-run structured logs (RunLogger JSONL).
+                // Older history entries from before this feature won't have
+                // a file — the button hides itself in that case.
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    icon: const Icon(Icons.article_outlined, size: 18),
+                    label: const Text('View full logs'),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    onPressed: () => _openRunLogs(run),
+                  ),
+                ),
+                const SizedBox(height: 8),
                 // Summary stats
                 _detailRow('Total Stocks', '${run.totalStocks}'),
                 _detailRow('Final Active', '${run.finalActiveStocks}'),
@@ -324,6 +343,26 @@ class _StrategyHistoryScreenState extends State<StrategyHistoryScreen> {
           );
         },
       ),
+    );
+  }
+
+  Future<void> _openRunLogs(DailyRunSummaryModel run) async {
+    final runId = RunLogger.makeRunId(run.date, run.configId);
+    // Confirm the JSONL file actually exists before pushing; older runs
+    // from before the per-run logger landed won't have one.
+    final path = await RunLogger.runFilePath(runId);
+    if (!mounted) return;
+    if (path == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text(
+                'No structured log saved for this run (predates the run logger).')),
+      );
+      return;
+    }
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => RunLogDetailScreen(runId: runId)),
     );
   }
 

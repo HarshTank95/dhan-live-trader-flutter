@@ -8,6 +8,39 @@ import '../services/scrip_service.dart';
 /// Parameter type for auto-generating config UI.
 enum ParamType { integer, decimal, boolean, time }
 
+/// Structured diagnostic output from a single [BaseStrategy.scan] call.
+/// Lets the engine log "why nothing matched" without parsing log strings.
+class ScanReport {
+  /// Stocks present in todayCandles that had a non-empty candle list.
+  final int stocksEvaluated;
+
+  /// Candles whose time fell in the scan window — i.e. the only candles that
+  /// were actually run through the dominance rules. Zero here means the scan
+  /// window had no closed candles yet.
+  final int candlesInWindow;
+
+  /// Per-rule rejection counts (e.g. `{'R5-VolMult': 147, 'R6a-AbsVol': 31}`).
+  final Map<String, int> rejectCounts;
+
+  ScanReport({
+    required this.stocksEvaluated,
+    required this.candlesInWindow,
+    required this.rejectCounts,
+  });
+
+  /// Top N rejection reasons as `key=count` pairs, highest first.
+  List<String> topRejects([int n = 3]) {
+    final entries = rejectCounts.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return entries.take(n).map((e) => '${e.key}=${e.value}').toList();
+  }
+
+  /// Total reject events (a single stock may be rejected multiple times across
+  /// candles, so this can exceed stocksEvaluated).
+  int get totalRejects =>
+      rejectCounts.values.fold<int>(0, (sum, v) => sum + v);
+}
+
 /// Metadata for a single strategy parameter.
 /// Drives automatic form generation in the config screen.
 class StrategyParamDef {
@@ -68,6 +101,8 @@ abstract class BaseStrategy {
   /// Phase 2: Scan candles for entry signals (e.g. dominance candle detection).
   /// Called at each scan interval (e.g. every 5 min from 9:30-10:00).
   /// [todayCandles] maps securityId → list of today's 5-min candles (oldest first).
+  /// [onScanReport] receives structured diagnostics (per-rule reject counts,
+  /// candles examined) for downstream logging without parsing log strings.
   List<StrategySignalModel> scan({
     required String configId,
     required Map<int, CandleStatsModel> stats,
@@ -76,6 +111,7 @@ abstract class BaseStrategy {
     required ScripService scripService,
     required Set<int> alreadySignalled,
     void Function(String message)? debugLog,
+    void Function(ScanReport report)? onScanReport,
   });
 
   /// Phase 3: Check if a WebSocket tick triggers entry for any active signal.
@@ -96,4 +132,10 @@ abstract class BaseStrategy {
     required FeedUpdate tick,
     required StrategyTradeModel trade,
   });
+
+  /// Human-readable hint explaining what a reject key (e.g. 'R5-VolMult')
+  /// usually means. Used by the engine's WHY ZERO diagnostic to give devs
+  /// an actionable cause without grepping per-stock REJECT lines.
+  /// Default implementation returns null — strategies override to ship hints.
+  String? diagnosisHint(String rule) => null;
 }

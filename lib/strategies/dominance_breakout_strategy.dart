@@ -255,6 +255,20 @@ class DominanceBreakoutStrategy extends BaseStrategy {
         ),
       ];
 
+  @override
+  String? diagnosisHint(String rule) {
+    if (rule.startsWith('R1')) return 'All candles bearish — flat/down day.';
+    if (rule.startsWith('R2')) return 'Body % outside 70-85 — relax bounds or check candle data.';
+    if (rule.startsWith('R3')) return 'Wicks too small — pure-body candles, not dominance shape.';
+    if (rule.startsWith('R4')) return 'Candle size outside 1-2.5×avg — calm or volatile day.';
+    if (rule.startsWith('R5')) return 'Volume < 2×avg — quiet session OR partial-candle data at fetch time.';
+    if (rule.startsWith('R6a')) return 'Candle vol < 5000 — illiquid OR partial-candle data.';
+    if (rule.startsWith('R6b')) return 'A prior candle since 9:15 had vol < 5000 — choppy opening.';
+    if (rule.startsWith('R7')) return 'Cumulative move too large vs avg — gappy/runaway day.';
+    if (rule.startsWith('R8')) return 'Gap up/down outside +2.5%/-1% — overnight news / gap day.';
+    return null;
+  }
+
   // ── Phase 1: Prepare (Pre-Market) ──────────────────────────────────────
 
   @override
@@ -344,10 +358,15 @@ class DominanceBreakoutStrategy extends BaseStrategy {
     required ScripService scripService,
     required Set<int> alreadySignalled,
     void Function(String message)? debugLog,
+    void Function(ScanReport report)? onScanReport,
   }) {
     final signals = <StrategySignalModel>[];
     final p = _Params(params);
+    // Reject counts are always tracked (cheap) so the engine can surface a
+    // structured ScanReport even when verbose debugLog is disabled.
     final rejectCounts = <String, int>{};
+    int stocksEvaluated = 0;
+    int candlesInWindow = 0;
 
     // Build screening window from params (matches C#: IsActiveAt check)
     final scanStart = Duration(
@@ -371,6 +390,7 @@ class DominanceBreakoutStrategy extends BaseStrategy {
       if (stat == null) continue;
 
       if (candles.isEmpty) continue;
+      stocksEvaluated++;
 
       // C# processes EVERY candle via ProcessCandle and checks IsActiveAt.
       // We iterate all candles in the screening window; first match wins.
@@ -379,14 +399,14 @@ class DominanceBreakoutStrategy extends BaseStrategy {
         final candleTime = Duration(
             hours: candle.date.hour, minutes: candle.date.minute);
         if (candleTime < scanStart || candleTime > scanEnd) continue;
+        candlesInWindow++;
 
         final result = _isDominanceCandle(candle, candles, stat, p,
-          onReject: debugLog != null
-            ? (sym, rule, detail) {
-                rejectCounts[rule] = (rejectCounts[rule] ?? 0) + 1;
-                debugLog('REJECT $sym @${candle.date.hour}:${candle.date.minute.toString().padLeft(2, "0")} $rule: $detail');
-              }
-            : null,
+          onReject: (sym, rule, detail) {
+            rejectCounts[rule] = (rejectCounts[rule] ?? 0) + 1;
+            debugLog?.call(
+                'REJECT $sym @${candle.date.hour}:${candle.date.minute.toString().padLeft(2, "0")} $rule: $detail');
+          },
         );
 
         if (result != null) {
@@ -435,6 +455,13 @@ class DominanceBreakoutStrategy extends BaseStrategy {
           .join(', ');
       debugLog('REJECTION SUMMARY: $summary (total candles checked across ${todayCandles.length} stocks)');
     }
+
+    // Structured report (always emitted) for downstream diagnostics.
+    onScanReport?.call(ScanReport(
+      stocksEvaluated: stocksEvaluated,
+      candlesInWindow: candlesInWindow,
+      rejectCounts: rejectCounts,
+    ));
 
     return signals;
   }

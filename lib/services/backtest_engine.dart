@@ -7,6 +7,7 @@ import '../models/strategy_signal_model.dart';
 import '../models/strategy_trade_model.dart';
 import '../services/app_logger.dart';
 import '../services/candle_repository.dart';
+import '../services/run_logger.dart';
 import '../services/scrip_service.dart';
 import '../strategies/base_strategy.dart';
 
@@ -34,6 +35,9 @@ class BacktestEngine {
   final void Function(String message)? onLog;
 
   bool _cancelled = false;
+  // Per-backtest structured logger. Same JSONL format and viewer as live
+  // engine runs — surfaces in the Log Viewer "Runs" tab with kind=backtest.
+  RunLoggerSession? _runLog;
 
   BacktestEngine({
     required this.strategy,
@@ -60,6 +64,27 @@ class BacktestEngine {
 
     final historicalDays = (params['historicalDays'] as num?)?.toInt() ?? 10;
 
+    // Open a per-backtest log file. Same JSONL format as live runs — viewable
+    // from the Log Viewer "Runs" tab so devs can replay any past simulation.
+    final now = DateTime.now();
+    final startTimeStr =
+        '${now.hour.toString().padLeft(2, "0")}:${now.minute.toString().padLeft(2, "0")}:${now.second.toString().padLeft(2, "0")}';
+    final runDate = _fmt(now);
+    // Distinguish multiple backtest runs on the same day by appending the
+    // strategy type + a short timestamp suffix.
+    final runId =
+        'bt_${runDate}_${strategy.type}_${now.millisecondsSinceEpoch ~/ 1000 % 100000}';
+    _runLog = await RunLogger.startRun(
+      runId: runId,
+      date: runDate,
+      configId: 'backtest_${strategy.type}',
+      configName: '${strategy.displayName} (${_fmt(fromDate)} → ${_fmt(toDate)})',
+      strategyType: strategy.type,
+      paperTrading: true,
+      startTime: startTimeStr,
+      kind: 'backtest',
+    );
+
     // ── Phase 1: Download all candle data ──────────────────────────
     onProgress?.call('download', 0, securityIds.length, 'Starting data download...');
     _log('═══ BACKTEST STARTING ═══');
@@ -68,6 +93,15 @@ class BacktestEngine {
     _log('Universe: $stockUniverseLabel (${securityIds.length} stocks)');
     _log('Risk: ₹${params['fixedStopLoss']} | Target: ₹${params['fixedTarget']} | Max trades/day: ${params['maxTradesPerDay']}');
     _log('Downloading candle data for ${securityIds.length} stocks...');
+    _runLog?.info('Backtest', 'Backtest started', {
+      'strategy': strategy.type,
+      'fromDate': _fmt(fromDate),
+      'toDate': _fmt(toDate),
+      'universe': stockUniverseLabel,
+      'universeSize': securityIds.length,
+      'historicalDays': historicalDays,
+      'params': params,
+    });
 
     // We need candles from (fromDate - historicalDays - buffer) to toDate
     // The extra days are for computing stats (avgVolume, avgCandleSize)
@@ -87,7 +121,11 @@ class BacktestEngine {
       isCancelled: () => _cancelled,
     );
 
-    if (_cancelled) return _emptyResult(fromDate, toDate, stockUniverseLabel, stopwatch);
+    if (_cancelled) {
+      final r = _emptyResult(fromDate, toDate, stockUniverseLabel, stopwatch);
+      await _closeBacktestLog(r, 'cancelled');
+      return r;
+    }
 
     _log('Download complete. Got data for ${allCandleData.length} stocks.');
 
@@ -153,6 +191,16 @@ class BacktestEngine {
             '${dayResult.tradesEntered} trades, '
             'P&L: ₹${dayResult.dayPnl.toStringAsFixed(0)}');
       }
+      _runLog?.info('Backtest', 'Day complete', {
+        'date': dateStr,
+        'stocksScanned': dayResult.stocksScanned,
+        'stocksAfterElim': dayResult.stocksAfterElimination,
+        'signals': dayResult.dominanceSignals,
+        'trades': dayResult.tradesEntered,
+        'wins': dayResult.wins,
+        'losses': dayResult.losses,
+        'dayPnl': dayResult.dayPnl,
+      });
     }
 
     // ── Phase 5: Aggregate results ─────────────────────────────────
@@ -191,7 +239,7 @@ class BacktestEngine {
     _log('Total P&L: ₹${totalPnl.toStringAsFixed(0)} | Max Drawdown: ₹${maxDrawdown.toStringAsFixed(0)}');
     _log('Duration: ${stopwatch.elapsed.inSeconds}s');
 
-    return BacktestResultModel(
+    final result = BacktestResultModel(
       strategyType: strategy.type,
       strategyName: strategy.displayName,
       params: Map.from(params),
@@ -212,6 +260,27 @@ class BacktestEngine {
       peakPnl: peakPnl,
       dayResults: dayResults,
     );
+    await _closeBacktestLog(result, _cancelled ? 'cancelled' : 'completed');
+    return result;
+  }
+
+  /// Finalize the backtest run log with summary stats. Safe to call multiple
+  /// times — the underlying file write is idempotent.
+  Future<void> _closeBacktestLog(BacktestResultModel r, String status) async {
+    if (_runLog == null) return;
+    final now = DateTime.now();
+    final endTime =
+        '${now.hour.toString().padLeft(2, "0")}:${now.minute.toString().padLeft(2, "0")}:${now.second.toString().padLeft(2, "0")}';
+    await _runLog!.close(
+      status: status,
+      endTime: endTime,
+      signals: r.totalSignals,
+      trades: r.totalTrades,
+      totalStocks: r.stockUniverseSize,
+      finalActiveStocks: r.stockUniverseSize,
+      totalPnl: r.totalPnl,
+    );
+    _runLog = null;
   }
 
   // ── Per-Day Simulation ──────────────────────────────────────────────
@@ -302,6 +371,13 @@ class BacktestEngine {
     final allSignals = <StrategySignalModel>[];
     int stocksAfterElimination = activeIds.length;
 
+    // Per-day scan diagnostics — aggregated across all slots for the
+    // WHY ZERO line at end-of-day.
+    int dayScanSlots = 0;
+    int dayStocksEvaluated = 0;
+    int dayCandlesEvaluated = 0;
+    final dayRejects = <String, int>{};
+
     for (final slot in screeningSlots) {
       // Eliminate stocks whose latest candle (up to this slot) has low volume
       final toRemove = <int>[];
@@ -360,6 +436,7 @@ class BacktestEngine {
           if (upToSlot.isNotEmpty) slotCandles[secId] = upToSlot;
         }
 
+        ScanReport? lastReport;
         final signals = strategy.scan(
           configId: 'backtest',
           stats: stats,
@@ -367,7 +444,36 @@ class BacktestEngine {
           params: params,
           scripService: scripService,
           alreadySignalled: alreadySignalled,
+          onScanReport: (r) => lastReport = r,
         );
+
+        // Per-slot structured SCAN summary into the backtest run log, same
+        // format the live engine uses. Lets devs replay any past simulation
+        // and pinpoint which rule eliminated stocks on a given day/slot.
+        if (lastReport != null) {
+          final r = lastReport!;
+          dayScanSlots++;
+          dayStocksEvaluated += r.stocksEvaluated;
+          dayCandlesEvaluated += r.candlesInWindow;
+          r.rejectCounts.forEach((rule, count) {
+            dayRejects[rule] = (dayRejects[rule] ?? 0) + count;
+          });
+          final slotLabel =
+              '${(slot ~/ 60).toString().padLeft(2, "0")}:${(slot % 60).toString().padLeft(2, "0")}';
+          _runLog?.info(
+            'Scan',
+            'SCAN [$dateStr $slotLabel] in=${r.stocksEvaluated} window=${r.candlesInWindow} signals=${signals.length}'
+            '${r.topRejects(3).isEmpty ? "" : " | ${r.topRejects(3).join(" ")}"}',
+            {
+              'date': dateStr,
+              'slot': slotLabel,
+              'stocksEvaluated': r.stocksEvaluated,
+              'candlesInWindow': r.candlesInWindow,
+              'signals': signals.length,
+              'rejectCounts': r.rejectCounts,
+            },
+          );
+        }
 
         for (final signal in signals) {
           alreadySignalled.add(signal.securityId);
@@ -494,6 +600,37 @@ class BacktestEngine {
 
     _log('DAY SUMMARY [$dateStr]: Scanned=$totalStocksScanned AfterElim=$stocksAfterElimination Signals=${allSignals.length} Trades=${trades.length} W=$dayWins L=$dayLosses PnL=₹${dayPnl.toStringAsFixed(0)}');
 
+    // WHY ZERO per-day diagnostic in the run log (only when 0 signals).
+    // Same rationale as the live engine: gives devs an at-a-glance reason
+    // a backtest day produced nothing without grepping per-stock REJECT lines.
+    if (allSignals.isEmpty && dayScanSlots > 0) {
+      final sorted = dayRejects.entries.toList()
+        ..sort((a, b) => b.value.compareTo(a.value));
+      final totalRej = dayRejects.values.fold<int>(0, (sum, v) => sum + v);
+      String reason;
+      if (dayCandlesEvaluated == 0) {
+        reason = 'No candles in scan window.';
+      } else if (sorted.isEmpty) {
+        reason = 'Window had candles but no rejects — logic gap.';
+      } else {
+        final top = sorted.first;
+        final pct =
+            totalRej > 0 ? (top.value * 100 / totalRej).round() : 0;
+        reason = 'Dominant: ${top.key} (${top.value}×, $pct%)';
+      }
+      final avgStocks = dayScanSlots > 0
+          ? (dayStocksEvaluated / dayScanSlots).round()
+          : 0;
+      _runLog?.warn('Diagnosis',
+          'WHY ZERO [$dateStr]: $dayScanSlots slots × $avgStocks stocks avg = $dayCandlesEvaluated candle-checks. $reason', {
+        'date': dateStr,
+        'scanSlots': dayScanSlots,
+        'avgStocksPerSlot': avgStocks,
+        'candlesEvaluated': dayCandlesEvaluated,
+        'aggregateRejects': dayRejects,
+      });
+    }
+
     return BacktestDayResult(
       date: dateStr,
       stocksScanned: totalStocksScanned,
@@ -572,6 +709,9 @@ class BacktestEngine {
   void _log(String msg) {
     onLog?.call(msg);
     AppLogger.info('Backtest', msg);
+    // Mirror to the per-backtest run log so the JSONL file is a complete
+    // forensic record (matches the live engine behavior).
+    _runLog?.info('Backtest', msg);
   }
 
   String _fmt(DateTime d) =>

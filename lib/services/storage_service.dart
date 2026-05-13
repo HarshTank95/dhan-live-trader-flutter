@@ -25,6 +25,19 @@ class StorageService {
   static const _keyPaperBalance = 'paper_balance';
   static const _keyPaperInitialCapital = 'paper_initial_capital';
   static const _keyTradingMode = 'trading_mode';
+  static const _keyLogRetentionDays = 'log_retention_days';
+
+  // ── Per-run log retention ────────────────────────────────────────────
+  /// Default: 14 days. UI exposes 7 / 14 / 30 presets but any int is accepted.
+  static Future<int> getLogRetentionDays() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(_keyLogRetentionDays) ?? 14;
+  }
+
+  static Future<void> setLogRetentionDays(int days) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_keyLogRetentionDays, days);
+  }
 
   // ── Active Strategy Tracking ───────────────────────────────────────
   static Future<void> setActiveStrategy(String? configId) async {
