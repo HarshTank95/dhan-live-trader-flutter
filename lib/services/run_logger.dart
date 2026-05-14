@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -67,6 +66,11 @@ class RunLogger {
       if (!await jsonlFile.exists()) {
         await jsonlFile.create();
       }
+      // One IOSink per run, opened in append mode. All emits stream through
+      // this single handle so high-volume per-stock REJECT events can't race
+      // each other and drop writes (the previous per-event writeAsString
+      // pattern lost ~99% of REJECT events under load).
+      final sink = jsonlFile.openWrite(mode: FileMode.append);
 
       final meta = <String, dynamic>{
         'runId': runId,
@@ -89,7 +93,7 @@ class RunLogger {
 
       return RunLoggerSession._(
         runId: runId,
-        jsonlFile: jsonlFile,
+        sink: sink,
         metaFile: File(metaPath),
         meta: meta,
       );
@@ -217,27 +221,33 @@ class RunLogger {
   }
 }
 
-/// An open per-run logger. Holds a JSONL file handle for append-only writes
+/// An open per-run logger. Holds a single [IOSink] for append-only writes
 /// and a meta file that gets rewritten on each [updateMeta]/[close].
+///
+/// The sink-per-session design is important: the dominance strategy can fire
+/// thousands of per-stock REJECT events per scan slot. A previous implementation
+/// did `unawaited(writeAsString(append))` per event — those concurrent file
+/// opens raced each other and silently dropped most writes. With a single sink
+/// every event is serialised through the same handle in arrival order.
 class RunLoggerSession {
   final String runId;
-  final File? _jsonlFile;
+  final IOSink? _sink;
   final File? _metaFile;
   final Map<String, dynamic> _meta;
   final bool _disabled;
 
   RunLoggerSession._({
     required this.runId,
-    required File jsonlFile,
+    required IOSink sink,
     required File metaFile,
     required Map<String, dynamic> meta,
-  })  : _jsonlFile = jsonlFile,
+  })  : _sink = sink,
         _metaFile = metaFile,
         _meta = meta,
         _disabled = false;
 
   RunLoggerSession._disabled(this.runId)
-      : _jsonlFile = null,
+      : _sink = null,
         _metaFile = null,
         _meta = {},
         _disabled = true;
@@ -253,7 +263,7 @@ class RunLoggerSession {
 
   void _emit(
       String level, String tag, String msg, Map<String, dynamic>? data) {
-    if (_disabled || _jsonlFile == null) return;
+    if (_disabled || _sink == null) return;
     try {
       final ev = <String, dynamic>{
         't': DateTime.now().toIso8601String(),
@@ -264,12 +274,7 @@ class RunLoggerSession {
       if (data != null && data.isNotEmpty) {
         ev['data'] = data;
       }
-      // Fire-and-forget append. Each line is independent JSON, so partial
-      // writes cannot corrupt earlier events.
-      unawaited(
-        _jsonlFile.writeAsString('${jsonEncode(ev)}\n',
-            mode: FileMode.append, flush: false),
-      );
+      _sink.writeln(jsonEncode(ev));
     } catch (e) {
       debugPrint('[RunLogger] _emit failed: $e');
     }
@@ -287,7 +292,8 @@ class RunLoggerSession {
     }
   }
 
-  /// Finalize the run. Sets endTime and status, persists final meta.
+  /// Finalize the run. Sets endTime and status, persists final meta and
+  /// flushes/closes the JSONL sink.
   Future<void> close({
     required String status,
     required String endTime,
@@ -307,6 +313,12 @@ class RunLoggerSession {
     if (finalActiveStocks != null) patch['finalActiveStocks'] = finalActiveStocks;
     if (totalPnl != null) patch['totalPnl'] = totalPnl;
     await updateMeta(patch);
+    try {
+      await _sink?.flush();
+      await _sink?.close();
+    } catch (e) {
+      debugPrint('[RunLogger] close sink failed: $e');
+    }
   }
 }
 

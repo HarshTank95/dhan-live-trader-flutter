@@ -568,8 +568,15 @@ class StrategyEngine {
       params: config.params,
       scripService: _scripService,
       alreadySignalled: _alreadySignalled,
+      // Plain-text summary line ("REJECTION SUMMARY: ...") still mirrors to
+      // the activity log; per-stock detail goes through onStockReject.
       debugLog: (msg) => _log('Scan', msg),
       onScanReport: (report) => lastReport = report,
+      onStockReject: (ev) => _runLog?.info(
+        'Reject',
+        '${ev.symbol} ${ev.rule} @${ev.candleTime.hour.toString().padLeft(2, "0")}:${ev.candleTime.minute.toString().padLeft(2, "0")}: ${ev.detail}',
+        ev.toJson(),
+      ),
     );
 
     // ── Per-slot structured SCAN summary ──────────────────────────────────

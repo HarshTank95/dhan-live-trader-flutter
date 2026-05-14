@@ -41,6 +41,53 @@ class ScanReport {
       rejectCounts.values.fold<int>(0, (sum, v) => sum + v);
 }
 
+/// One per-stock-per-candle rejection event from inside [BaseStrategy.scan].
+///
+/// This is the forensic counterpart to [ScanReport]: the report tells you
+/// "75% of rejects were R1-Bullish"; a stream of these events tells you
+/// "TCS at 09:30 was rejected by R1-Bullish because body=-0.05". Used to
+/// answer "did the live engine see stock X and reject it, or never see it
+/// at all?" when reconciling live output against the backtest.
+class StockRejectEvent {
+  final String symbol;
+  final int securityId;
+  final String rule;
+  final String detail;
+  final DateTime candleTime;
+  final double candleOpen;
+  final double candleHigh;
+  final double candleLow;
+  final double candleClose;
+  final double candleVolume;
+
+  StockRejectEvent({
+    required this.symbol,
+    required this.securityId,
+    required this.rule,
+    required this.detail,
+    required this.candleTime,
+    required this.candleOpen,
+    required this.candleHigh,
+    required this.candleLow,
+    required this.candleClose,
+    required this.candleVolume,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'symbol': symbol,
+        'securityId': securityId,
+        'rule': rule,
+        'detail': detail,
+        'candleTime':
+            '${candleTime.hour.toString().padLeft(2, "0")}:${candleTime.minute.toString().padLeft(2, "0")}',
+        'o': candleOpen,
+        'h': candleHigh,
+        'l': candleLow,
+        'c': candleClose,
+        'v': candleVolume,
+      };
+}
+
 /// Metadata for a single strategy parameter.
 /// Drives automatic form generation in the config screen.
 class StrategyParamDef {
@@ -103,6 +150,9 @@ abstract class BaseStrategy {
   /// [todayCandles] maps securityId → list of today's 5-min candles (oldest first).
   /// [onScanReport] receives structured diagnostics (per-rule reject counts,
   /// candles examined) for downstream logging without parsing log strings.
+  /// [onStockReject] is fired once per (stock, candle, failed rule) — the
+  /// engine writes these as structured 'Reject' events to the per-run JSONL
+  /// so dev can answer "did live see stock X and why did it reject it?".
   List<StrategySignalModel> scan({
     required String configId,
     required Map<int, CandleStatsModel> stats,
@@ -112,6 +162,7 @@ abstract class BaseStrategy {
     required Set<int> alreadySignalled,
     void Function(String message)? debugLog,
     void Function(ScanReport report)? onScanReport,
+    void Function(StockRejectEvent event)? onStockReject,
   });
 
   /// Phase 3: Check if a WebSocket tick triggers entry for any active signal.

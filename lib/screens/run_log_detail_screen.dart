@@ -24,12 +24,13 @@ class _RunLogDetailScreenState extends State<RunLogDetailScreen> {
   String _search = '';
   String _tagFilter = ''; // '' = all
   String _levelFilter = ''; // '', 'warn', 'error'
+  final TextEditingController _searchController = TextEditingController();
 
   /// Tag chips are derived from the loaded events, frequency-sorted, so any
   /// new strategy that introduces its own tag namespace (e.g. 'MeanReversion',
   /// 'GapFade') automatically gets first-class filter chips without editing
-  /// this screen.
-  List<String> get _tagPresets {
+  /// this screen. Returns `[(tag, count), ...]` sorted by count desc.
+  List<MapEntry<String, int>> get _tagPresets {
     final counts = <String, int>{};
     for (final e in _events) {
       if (e.tag.isEmpty) continue;
@@ -37,13 +38,38 @@ class _RunLogDetailScreenState extends State<RunLogDetailScreen> {
     }
     final sorted = counts.entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
-    return sorted.map((e) => e.key).toList();
+    return sorted;
   }
+
+  /// Total events at info/warn/error level — used to label level chips so
+  /// the user knows in advance how many lines a click will produce.
+  Map<String, int> get _levelCounts {
+    int info = 0, warn = 0, err = 0;
+    for (final e in _events) {
+      if (e.level == 'error') {
+        err++;
+      } else if (e.level == 'warn') {
+        warn++;
+      } else {
+        info++;
+      }
+    }
+    return {'info': info, 'warn': warn, 'error': err};
+  }
+
+  bool get _hasActiveFilter =>
+      _tagFilter.isNotEmpty || _levelFilter.isNotEmpty || _search.isNotEmpty;
 
   @override
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -117,6 +143,7 @@ class _RunLogDetailScreenState extends State<RunLogDetailScreen> {
     if (e.tag == 'Fetch') return Colors.cyan;
     if (e.tag == 'PreMarket') return Colors.indigo;
     if (e.tag == 'Diagnosis') return Colors.deepOrange;
+    if (e.tag == 'Reject') return Colors.amber.shade700;
     if (e.message.contains('DOMINANCE') || e.message.contains('TRADE')) {
       return Colors.green;
     }
@@ -156,8 +183,9 @@ class _RunLogDetailScreenState extends State<RunLogDetailScreen> {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
                   child: TextField(
+                    controller: _searchController,
                     decoration: InputDecoration(
-                      hintText: 'Search…',
+                      hintText: 'Search (e.g. TCS, R5, REJECT)…',
                       prefixIcon: const Icon(Icons.search, size: 20),
                       isDense: true,
                       contentPadding:
@@ -171,12 +199,30 @@ class _RunLogDetailScreenState extends State<RunLogDetailScreen> {
                 ),
                 _filterRow(),
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
                   child: Row(
                     children: [
                       Text('${visible.length} / ${_events.length} events',
                           style: TextStyle(
                               color: Colors.grey.shade600, fontSize: 11)),
+                      const Spacer(),
+                      if (_hasActiveFilter)
+                        TextButton.icon(
+                          onPressed: () => setState(() {
+                            _tagFilter = '';
+                            _levelFilter = '';
+                            _search = '';
+                            _searchController.clear();
+                          }),
+                          icon: const Icon(Icons.filter_alt_off, size: 14),
+                          label: const Text('Clear filters',
+                              style: TextStyle(fontSize: 11)),
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 6),
+                            minimumSize: const Size(0, 28),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -232,45 +278,89 @@ class _RunLogDetailScreenState extends State<RunLogDetailScreen> {
   }
 
   Widget _filterRow() {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+    final tags = _tagPresets;
+    final lvl = _levelCounts;
+    final allCount = _events.length;
+    final warnPlusCount = lvl['warn']! + lvl['error']!;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _filterRowLabelled(
+          label: 'Tag',
+          chips: [
+            _tagChip('All', '', allCount),
+            for (final entry in tags) _tagChip(entry.key, entry.key, entry.value),
+          ],
+        ),
+        _filterRowLabelled(
+          label: 'Level',
+          chips: [
+            _levelChip('Info+', '', allCount),
+            _levelChip('Warn+', 'warn', warnPlusCount),
+            _levelChip('Error', 'error', lvl['error']!),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _filterRowLabelled({required String label, required List<Widget> chips}) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 2, 8, 2),
       child: Row(
         children: [
-          _tagChip('All', ''),
-          for (final t in _tagPresets) _tagChip(t, t),
-          const SizedBox(width: 8),
-          const VerticalDivider(width: 1),
-          const SizedBox(width: 8),
-          _levelChip('Info+', ''),
-          _levelChip('Warn+', 'warn'),
-          _levelChip('Error', 'error'),
+          SizedBox(
+            width: 38,
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                color: Colors.grey.shade600,
+              ),
+            ),
+          ),
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(children: chips),
+            ),
+          ),
         ],
       ),
     );
   }
 
-  Widget _tagChip(String label, String value) {
+  /// A filter chip is only visibly "selected" when it represents a
+  /// non-default choice. The default "All" / "Info+" chips behave as the
+  /// neutral baseline so the filter row never *looks* like two filters are
+  /// stuck on when nothing is actually being filtered.
+  Widget _tagChip(String label, String value, int count) {
+    final isDefault = value.isEmpty;
     final active = _tagFilter == value;
+    final showSelected = active && !isDefault;
     return Padding(
       padding: const EdgeInsets.only(right: 6),
       child: ChoiceChip(
-        label: Text(label, style: const TextStyle(fontSize: 11)),
-        selected: active,
-        onSelected: (_) => setState(() => _tagFilter = value),
+        label: Text('$label ($count)', style: const TextStyle(fontSize: 11)),
+        selected: showSelected,
+        onSelected: (_) => setState(() => _tagFilter = active ? '' : value),
         visualDensity: VisualDensity.compact,
       ),
     );
   }
 
-  Widget _levelChip(String label, String value) {
+  Widget _levelChip(String label, String value, int count) {
+    final isDefault = value.isEmpty;
     final active = _levelFilter == value;
+    final showSelected = active && !isDefault;
     return Padding(
       padding: const EdgeInsets.only(right: 6),
       child: ChoiceChip(
-        label: Text(label, style: const TextStyle(fontSize: 11)),
-        selected: active,
-        onSelected: (_) => setState(() => _levelFilter = value),
+        label: Text('$label ($count)', style: const TextStyle(fontSize: 11)),
+        selected: showSelected,
+        onSelected: (_) => setState(() => _levelFilter = active ? '' : value),
         visualDensity: VisualDensity.compact,
         selectedColor: value == 'error'
             ? Colors.red.shade100

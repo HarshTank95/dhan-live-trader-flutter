@@ -359,6 +359,7 @@ class DominanceBreakoutStrategy extends BaseStrategy {
     required Set<int> alreadySignalled,
     void Function(String message)? debugLog,
     void Function(ScanReport report)? onScanReport,
+    void Function(StockRejectEvent event)? onStockReject,
   }) {
     final signals = <StrategySignalModel>[];
     final p = _Params(params);
@@ -404,8 +405,21 @@ class DominanceBreakoutStrategy extends BaseStrategy {
         final result = _isDominanceCandle(candle, candles, stat, p,
           onReject: (sym, rule, detail) {
             rejectCounts[rule] = (rejectCounts[rule] ?? 0) + 1;
-            debugLog?.call(
-                'REJECT $sym @${candle.date.hour}:${candle.date.minute.toString().padLeft(2, "0")} $rule: $detail');
+            // Per-stock-per-candle forensic event. The string debugLog still
+            // exists for the activity-buffer summary line below but no longer
+            // streams every reject — the structured channel does that job.
+            onStockReject?.call(StockRejectEvent(
+              symbol: sym,
+              securityId: secId,
+              rule: rule,
+              detail: detail,
+              candleTime: candle.date,
+              candleOpen: candle.open,
+              candleHigh: candle.high,
+              candleLow: candle.low,
+              candleClose: candle.close,
+              candleVolume: candle.volume,
+            ));
           },
         );
 

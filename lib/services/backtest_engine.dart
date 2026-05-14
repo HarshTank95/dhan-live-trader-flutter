@@ -437,6 +437,8 @@ class BacktestEngine {
         }
 
         ScanReport? lastReport;
+        final slotLabel =
+            '${(slot ~/ 60).toString().padLeft(2, "0")}:${(slot % 60).toString().padLeft(2, "0")}';
         final signals = strategy.scan(
           configId: 'backtest',
           stats: stats,
@@ -445,6 +447,18 @@ class BacktestEngine {
           scripService: scripService,
           alreadySignalled: alreadySignalled,
           onScanReport: (r) => lastReport = r,
+          // Same forensic stream as the live engine. Lets devs replay a
+          // backtest day side-by-side with a live JSONL and diff per-stock
+          // outcomes when results disagree.
+          onStockReject: (ev) => _runLog?.info(
+            'Reject',
+            '[$dateStr $slotLabel] ${ev.symbol} ${ev.rule} @${ev.candleTime.hour.toString().padLeft(2, "0")}:${ev.candleTime.minute.toString().padLeft(2, "0")}: ${ev.detail}',
+            {
+              ...ev.toJson(),
+              'date': dateStr,
+              'slot': slotLabel,
+            },
+          ),
         );
 
         // Per-slot structured SCAN summary into the backtest run log, same
@@ -458,8 +472,6 @@ class BacktestEngine {
           r.rejectCounts.forEach((rule, count) {
             dayRejects[rule] = (dayRejects[rule] ?? 0) + count;
           });
-          final slotLabel =
-              '${(slot ~/ 60).toString().padLeft(2, "0")}:${(slot % 60).toString().padLeft(2, "0")}';
           _runLog?.info(
             'Scan',
             'SCAN [$dateStr $slotLabel] in=${r.stocksEvaluated} window=${r.candlesInWindow} signals=${signals.length}'
