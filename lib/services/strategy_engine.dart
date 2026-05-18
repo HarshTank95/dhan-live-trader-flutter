@@ -312,6 +312,21 @@ class StrategyEngine {
         'badLowVol': badLow,
         'badZeroVol': badZero,
       });
+
+      // Per-stock prevClose snapshot — written to JSONL only (no activity-log
+      // noise). Lets devs `grep <SYMBOL>` in the run log to see the exact
+      // prevClose live used, then diff against backtest's snapshot to confirm
+      // whether a stock's R8-Gap reject was driven by a data-source mismatch
+      // (corporate action, adjusted vs unadjusted close, stale cache).
+      final prevCloseBySymbol = <String, double>{};
+      for (final m in _stockMetrics.values) {
+        prevCloseBySymbol[m.symbol] = m.prevClose;
+      }
+      _runLog?.info(
+        'PreMarket',
+        'Per-stock prevClose snapshot (${prevCloseBySymbol.length} stocks)',
+        {'prevCloseBySymbol': prevCloseBySymbol},
+      );
     }
   }
 
@@ -438,6 +453,7 @@ class StrategyEngine {
       int elimNoData = 0;
       int elimLowVol = 0;
       int elimApiErr = 0;
+      int strippedIncomplete = 0; // stocks where we dropped the live in-progress bar
       final toRemove = <int>[];
       // Track the most-recent candle time across all stocks fetched this slot.
       // If "latest" lags behind the expected just-closed candle by more than
@@ -445,6 +461,14 @@ class StrategyEngine {
       // rules will likely reject it on partial volume.
       int? latestCandleMinute;
       final staleHistogram = <int, int>{}; // minutes-of-day → count
+
+      // Slot minute used to strip Dhan's currently-forming bar. When we fetch
+      // at e.g. 09:20:05 Dhan returns the just-opened 09:20–09:25 bar with
+      // only seconds of trade data; treating that as a closed candle made the
+      // volume filter and dominance rules see flat near-zero bars and falsely
+      // reject ~60% of the universe. Backtest never hit this because cached
+      // candles are always closed bars.
+      final slotMinuteOfDay = screenTime.hour * 60 + screenTime.minute;
 
       for (final secId in activeIds) {
         if (_stopRequested) return;
@@ -457,8 +481,22 @@ class StrategyEngine {
             continue;
           }
 
+          // Drop the still-forming bar (start time >= this slot).
+          final closedNewestFirst = candles
+              .where((c) =>
+                  c.date.hour * 60 + c.date.minute < slotMinuteOfDay)
+              .toList();
+          if (closedNewestFirst.length != candles.length) {
+            strippedIncomplete++;
+          }
+          if (closedNewestFirst.isEmpty) {
+            toRemove.add(secId);
+            elimNoData++;
+            continue;
+          }
+
           // Store candles (oldest first)
-          _todayCandles[secId] = candles.reversed.toList();
+          _todayCandles[secId] = closedNewestFirst.reversed.toList();
 
           // Store day open price
           if (!_dayOpenPrices.containsKey(secId) && _todayCandles[secId]!.isNotEmpty) {
@@ -498,7 +536,7 @@ class StrategyEngine {
             'FETCH [${screenTime.hour.toString().padLeft(2, "0")}:${screenTime.minute.toString().padLeft(2, "0")}] '
             'latest=${(latestCandleMinute ~/ 60).toString().padLeft(2, "0")}:${(latestCandleMinute % 60).toString().padLeft(2, "0")} '
             'expected=${(expectedMin ~/ 60).toString().padLeft(2, "0")}:${(expectedMin % 60).toString().padLeft(2, "0")} '
-            'clean=$clean stale=$stale';
+            'clean=$clean stale=$stale incomplete=$strippedIncomplete';
         _log('Engine', freshness);
         _runLog?.info('Fetch', freshness, {
           'slot': '${screenTime.hour.toString().padLeft(2, "0")}:${screenTime.minute.toString().padLeft(2, "0")}',
@@ -506,6 +544,7 @@ class StrategyEngine {
           'expectedMin': expectedMin,
           'cleanStocks': clean,
           'staleStocks': stale,
+          'strippedIncompleteBars': strippedIncomplete,
         });
       }
 
@@ -688,32 +727,90 @@ class StrategyEngine {
       return;
     }
 
-    // Poll LTP for active signals using OHLC endpoint
-    final signalSecIds = _activeSignals.map((s) => s.securityId).toList();
+    final startCount = _activeSignals.length;
+    final shortestExpiry = _activeSignals
+        .map((s) => s.expiryTime)
+        .reduce((a, b) => a.isBefore(b) ? a : b);
+    _log('Engine',
+        'Monitoring LTP for $startCount candidates until ${shortestExpiry.hour.toString().padLeft(2, "0")}:${shortestExpiry.minute.toString().padLeft(2, "0")} (loop @ ~1 Hz)...');
 
-    _log('Engine', 'Monitoring LTP for ${signalSecIds.length} candidates...');
+    int polls = 0;
+    int breakoutsHit = 0;
+    int expiries = 0;
+    int partialBarHits = 0;
 
-    try {
-      final ltpMap = await _fetchLtpBatch(signalSecIds);
+    // ── Phase 0: catch breakouts that happened DURING the slot fetch delay.
+    //
+    // The slot fetch can take ~3 min when rate-limited at 5 req/sec across
+    // 350+ stocks. By the time we enter this monitor, the bar *after* the
+    // dominance candle has been forming for those 3 minutes. Its rolling
+    // "high" already reflects any tick that touched entry — the per-second
+    // LTP loop below would miss this because LTP is a point-in-time snapshot.
+    //
+    // Re-fetch each signal's intraday data and inspect bars AFTER the
+    // dominance candle. If any of them already broke above entry, enter
+    // immediately at the dominance price (the breakout happened — we just
+    // weren't watching). Restricting to post-dominance bars avoids a
+    // false-trigger from an earlier intraday spike whose high was unrelated
+    // to the dominance pattern.
+    for (final signal in List.of(_activeSignals)) {
+      if (_stopRequested) break;
+      if (_tradesPlacedToday >= maxTrades) break;
+      try {
+        final candles =
+            await _fetchIntradayCandles(signal.securityId, '5', date: DateTime.now());
+        if (candles.isEmpty) continue;
 
-      for (final signal in List.of(_activeSignals)) {
-        final ltp = ltpMap[signal.securityId];
-        if (ltp == null || ltp <= 0) continue;
+        // candles are newest-first per _parseCandles. Find the dominance
+        // candle by OHLC fingerprint — its index splits the list into
+        // post-dominance (newer, indices < dominanceIdx) and pre-dominance
+        // (older, > dominanceIdx).
+        int dominanceIdx = -1;
+        for (int i = 0; i < candles.length; i++) {
+          final c = candles[i];
+          if ((c.open - signal.candleOpen).abs() < 0.01 &&
+              (c.high - signal.candleHigh).abs() < 0.01 &&
+              (c.low - signal.candleLow).abs() < 0.01 &&
+              (c.close - signal.candleClose).abs() < 0.01) {
+            dominanceIdx = i;
+            break;
+          }
+        }
+        if (dominanceIdx <= 0) {
+          // -1 = couldn't find (unexpected); 0 = dominance is the newest bar
+          // (no post-dominance bars exist yet). Either way, fall through to
+          // the LTP poll loop.
+          continue;
+        }
 
-        // Check if LTP > dominance high (breakout!)
-        if (ltp > signal.entryPrice) {
-          _log('Engine', 'BREAKOUT: ${signal.symbol} LTP=$ltp > Entry=${signal.entryPrice}');
+        // Post-dominance bars are at indices [0, dominanceIdx). In
+        // newest-first order, dominanceIdx-1 is the oldest of those; loop
+        // from there toward 0 to find the EARLIEST bar that breached entry.
+        Candle? breakBar;
+        for (int i = dominanceIdx - 1; i >= 0; i--) {
+          if (candles[i].high > signal.entryPrice) {
+            breakBar = candles[i];
+            break;
+          }
+        }
 
-          // Calculate trade (position sizing)
-          final trade = _calculateTrade(signal, ltp);
+        if (breakBar != null) {
+          final barLabel =
+              '${breakBar.date.hour.toString().padLeft(2, "0")}:${breakBar.date.minute.toString().padLeft(2, "0")}';
+          _log('Engine',
+              'BREAKOUT (partial-bar): ${signal.symbol} bar=$barLabel high=${breakBar.high} > Entry=${signal.entryPrice} — caught during fetch-delay window');
+
+          final trade = _calculateTrade(signal, breakBar.high);
           if (trade != null) {
             _trades.add(trade);
             _tradesPlacedToday++;
             _activeSignals.remove(signal);
+            partialBarHits++;
 
-            _log('Engine', 'TRADE: ${trade.symbol} Qty=${trade.quantity} Entry=${trade.entryPrice} SL=${trade.stopLoss} Target=${trade.target}');
-            _addKeyEvent('TRADE: ${trade.symbol} Qty=${trade.quantity} @ ${trade.entryPrice}');
-
+            _log('Engine',
+                'TRADE: ${trade.symbol} Qty=${trade.quantity} Entry=${trade.entryPrice} SL=${trade.stopLoss} Target=${trade.target}');
+            _addKeyEvent(
+                'TRADE: ${trade.symbol} Qty=${trade.quantity} @ ${trade.entryPrice}');
             _sendUpdate('trade_update', {
               'type': 'entry',
               'symbol': trade.symbol,
@@ -724,24 +821,93 @@ class StrategyEngine {
               'target': trade.target,
               'isPaper': trade.isPaperTrade,
             });
-
-            // Place live order if not paper
             if (!config.paperTrading) {
               await _placeLiveOrder(trade);
             }
           }
         }
-
-        // Check expiry
-        if (DateTime.now().isAfter(signal.expiryTime)) {
-          _log('Engine', 'EXPIRED: ${signal.symbol} — no breakout before ${signal.expiryTime}, can be re-screened');
-          _activeSignals.remove(signal);
-          _alreadySignalled.remove(signal.securityId); // Can be re-screened
-        }
+      } catch (e) {
+        _log('Engine',
+            'Partial-bar pre-check error for ${signal.symbol}: $e');
       }
-    } catch (e) {
-      _log('Engine', 'LTP fetch error: $e');
     }
+
+    if (_activeSignals.isEmpty || _tradesPlacedToday >= maxTrades) {
+      _log('Engine',
+          'Breakout monitor done (partial-bar phase): candidates=$startCount entered=$partialBarHits — skipping LTP poll loop');
+      return;
+    }
+
+    // Loop until every signal has either entered, expired, or we hit maxTrades.
+    // Previously this was a single LTP snapshot per slot — if the breakout
+    // happened in between two slot ticks (which is most of the breakout
+    // window, since slots are 5 min apart), live missed it while the backtest
+    // saw the bar's full high and entered. Now we poll continuously; the
+    // RateLimiter on ApiCategory.quote (1 req/sec) throttles the loop.
+    while (!_stopRequested &&
+        _activeSignals.isNotEmpty &&
+        _tradesPlacedToday < maxTrades) {
+      final signalSecIds = _activeSignals.map((s) => s.securityId).toList();
+
+      try {
+        final ltpMap = await _fetchLtpBatch(signalSecIds);
+        polls++;
+
+        for (final signal in List.of(_activeSignals)) {
+          final ltp = ltpMap[signal.securityId];
+          if (ltp == null || ltp <= 0) continue;
+
+          if (ltp > signal.entryPrice) {
+            _log('Engine',
+                'BREAKOUT: ${signal.symbol} LTP=$ltp > Entry=${signal.entryPrice}');
+
+            final trade = _calculateTrade(signal, ltp);
+            if (trade != null) {
+              _trades.add(trade);
+              _tradesPlacedToday++;
+              _activeSignals.remove(signal);
+              breakoutsHit++;
+
+              _log('Engine',
+                  'TRADE: ${trade.symbol} Qty=${trade.quantity} Entry=${trade.entryPrice} SL=${trade.stopLoss} Target=${trade.target}');
+              _addKeyEvent(
+                  'TRADE: ${trade.symbol} Qty=${trade.quantity} @ ${trade.entryPrice}');
+
+              _sendUpdate('trade_update', {
+                'type': 'entry',
+                'symbol': trade.symbol,
+                'securityId': trade.securityId,
+                'entryPrice': trade.entryPrice,
+                'quantity': trade.quantity,
+                'stopLoss': trade.stopLoss,
+                'target': trade.target,
+                'isPaper': trade.isPaperTrade,
+              });
+
+              if (!config.paperTrading) {
+                await _placeLiveOrder(trade);
+              }
+              continue; // signal already removed
+            }
+          }
+
+          if (DateTime.now().isAfter(signal.expiryTime)) {
+            _log('Engine',
+                'EXPIRED: ${signal.symbol} — no breakout before ${signal.expiryTime}, can be re-screened (polls=$polls)');
+            _activeSignals.remove(signal);
+            _alreadySignalled.remove(signal.securityId);
+            expiries++;
+          }
+        }
+      } catch (e) {
+        _log('Engine', 'LTP fetch error: $e');
+        // Brief backoff on fetch error so we don't tight-loop on persistent failure.
+        await Future.delayed(const Duration(seconds: 1));
+      }
+    }
+
+    _log('Engine',
+        'Breakout monitor done: candidates=$startCount entered=${partialBarHits + breakoutsHit} (partial-bar=$partialBarHits ltp-poll=$breakoutsHit) expired=$expiries polls=$polls');
   }
 
   StrategyTradeModel? _calculateTrade(StrategySignalModel signal, double ltp) {

@@ -340,6 +340,21 @@ class BacktestEngine {
 
     final totalStocksScanned = activeIds.length;
 
+    // Per-stock prevClose snapshot for forensic diff against live. If R8-Gap
+    // ever rejects a stock in live but not in backtest (or vice versa), the
+    // two snapshots tell us instantly whether the source data diverged
+    // (corporate-action adjustment between adjusted/unadjusted endpoints, or
+    // stale cache). Written to JSONL only — no activity-log noise.
+    final prevCloseBySymbol = <String, double>{};
+    for (final s in stats.values) {
+      prevCloseBySymbol[s.symbol] = s.prevClose;
+    }
+    _runLog?.info(
+      'Backtest',
+      '[$dateStr] Per-stock prevClose snapshot (${prevCloseBySymbol.length} stocks)',
+      {'date': dateStr, 'prevCloseBySymbol': prevCloseBySymbol},
+    );
+
     // Step 2: Get today's candles for active stocks
     final todayCandles = <int, List<Candle>>{};
     for (final secId in List.of(activeIds)) {

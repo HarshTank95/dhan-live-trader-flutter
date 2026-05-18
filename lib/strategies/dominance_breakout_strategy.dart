@@ -664,7 +664,20 @@ class DominanceBreakoutStrategy extends BaseStrategy {
     if (stats.prevClose > 0) {
       final gapPercent = ((dayOpen - stats.prevClose) / stats.prevClose) * 100;
       if (gapPercent > p.maxGapUpPercent || gapPercent < -p.maxGapDownPercent) {
-        onReject?.call(sym, 'R8-Gap', 'gap=${gapPercent.toStringAsFixed(2)}% (limit: +${p.maxGapUpPercent}% / -${p.maxGapDownPercent}%)');
+        // Include open and prevClose in the detail string so future
+        // false-rejections (corporate-action adjustments, stale cache,
+        // unadjusted-vs-adjusted endpoint mismatches) are self-diagnosing
+        // from the JSONL alone. Next time live disagrees with backtest on
+        // R8, both engines' Reject events will show the raw numbers and
+        // the mismatch is one diff away.
+        onReject?.call(
+          sym,
+          'R8-Gap',
+          'gap=${gapPercent.toStringAsFixed(2)}% '
+              'open=${dayOpen.toStringAsFixed(2)} '
+              'prevClose=${stats.prevClose.toStringAsFixed(2)} '
+              '(limit: +${p.maxGapUpPercent}% / -${p.maxGapDownPercent}%)',
+        );
         return null;
       }
     }

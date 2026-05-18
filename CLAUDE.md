@@ -101,10 +101,15 @@ StrategyBackgroundService.start()
                  1. _loadInstruments()      — ScripService + Nifty 500 IDs
                  2. _loadPreMarketData()    — historical 5-min candles → CandleStatsModel
                  3. _runProgressiveScreening() — fetch candles every 5 min, volume filter,
-                                                 dominance screen from 9:35, REST LTP breakout poll
+                                                 dominance screen from 9:35, then _monitorBreakouts()
                  4. _monitorOpenPositions() — REST LTP poll every 3s until 3:15 PM (square-off)
                  5. _saveTrades() + _saveDailyRunSummary()
 ```
+
+`_monitorBreakouts()` runs in **two phases** after each slot's scan:
+
+1. **Phase 0 — partial-bar pre-check.** For each newly-detected (and still-active) signal, re-fetch the stock's intraday data, find the dominance candle by OHLC fingerprint, and inspect every bar that came *after* it. If any post-dominance bar's high already exceeds the entry price, enter immediately. This phase exists because the slot's fetch loop typically takes 2–3 min under the 5 req/sec rate limit on ~350 stocks — by the time the LTP poll starts, the bar after dominance has been forming for those minutes and any breakout in that window is already encoded in its current high. Without this, live missed every breakout that happened during the fetch delay (the backtest's "if bar high > entry, fill" semantics caught them effortlessly).
+2. **Phase 1 — continuous LTP poll loop.** For any signal still pending, loop calling `_fetchLtpBatch()` until every signal has entered, expired, or `maxTradesPerDay` is hit. The `RateLimiter` on `ApiCategory.quote` (1 req/sec) throttles the loop naturally — no explicit `Future.delayed` needed. Previously this was a single LTP snapshot per slot, which missed any breakout that happened between two slot ticks.
 
 `StrategyBackgroundService` keeps a main-isolate buffer of recent activity (`_activityBuffer`, max 300) and a `StrategySessionState` snapshot, both persisted to `SharedPreferences` (`strategy_activity_buffer_v1`, `strategy_session_state_v1`) on a debounced 500 ms flush. This allows the UI to recover full state if the main isolate gets killed while the background service keeps running.
 
@@ -147,6 +152,7 @@ Two storage layers:
 - Market hours filter: 9:15 AM – 3:30 PM IST. Candles outside this window are discarded during parsing.
 - `DhanService.fetchIntraday()` and `StrategyEngine._fetchIntradayCandles()` both apply this filter.
 - HTTP 400 from the intraday API = no data for that date (market holiday/closed) — return empty list, not an error.
+- **Live: strip the currently-forming bar before storing.** Dhan's intraday endpoint returns the just-opened bar (often with only a few seconds of tick data) as the "latest" candle. The live `_runProgressiveScreening` loop drops any candle whose start-minute ≥ the current slot's start-minute before writing to `_todayCandles`. Without this strip, the volume filter and dominance rules see a flat near-zero bar and falsely reject ~60% of the universe at every slot. The FETCH log line includes `incomplete=N` showing how many bars were stripped — a healthy run shows `incomplete ≈ active_stocks` at every slot. Backtest never hit this because `CandleRepository` only caches closed bars.
 
 ---
 
@@ -194,13 +200,17 @@ The dominance strategy hit a "live returns 0 candidates while backtest finds 26"
 **Per-run JSONL** (`RunLogger`):
 - File per run, lives forever (until retention sweeps it). Live + backtest both use it.
 - `BaseStrategy.scan()` returns a `ScanReport({stocksEvaluated, candlesInWindow, rejectCounts})` via `onScanReport` callback — strategies do not log strings, they emit structured payloads.
+- `BaseStrategy.scan()` also fires `onStockReject(StockRejectEvent)` once per (stock, candle, failed rule) — both engines wire this to a `Reject` tag in the JSONL with the candle's full OHLCV. Lets devs answer "did live see stock X and why did it reject it?" by diffing live vs backtest Reject streams per-symbol.
 - `BaseStrategy.diagnosisHint(rule)` returns a human-readable hint per rule key. Default null; `DominanceBreakoutStrategy` overrides with R1–R8 hints.
 
-**Four diagnostic events** emitted by both engines:
-- `SCAN [HH:MM] in=N window=M signals=K | R5=147 R6a=31` — per slot, structured payload includes full `rejectCounts` map
-- `PREMARKET: 499 loaded | avgVol p50=83k min=12 max=2.1M | bad(<1k)=8` — end of pre-market load
-- `FETCH [HH:MM] latest=09:30 expected=09:30 clean=244 stale=4` — flags partial-candle data from Dhan
-- `WHY ZERO: 7 slots × 248 stocks avg = 1736 checks. Dominant reject: R5-VolMult (1247×, 71%). <hint>` — only when 0 signals at end of day; consults `strategy.diagnosisHint(topReject)` for the hint text
+**Diagnostic events** emitted by both engines (tags in parentheses):
+- `SCAN [HH:MM] in=N window=M signals=K | R5=147 R6a=31` (`Scan` / `Backtest`) — per slot, structured payload includes full `rejectCounts` map
+- `PREMARKET: 499 loaded | avgVol p50=83k min=12 max=2.1M | bad(<1k)=8` (`PreMarket`) — end of pre-market load
+- `Per-stock prevClose snapshot (N stocks)` (`PreMarket` / `Backtest`) — JSONL-only payload `{prevCloseBySymbol: {SYM: close, …}}`. Lets devs diff live's pre-market `stats.prevClose` against backtest's for any stock — pinpoints data-source mismatches (corporate-action adjustments, adjusted-vs-unadjusted endpoints, stale cache) that cause R8-Gap to disagree.
+- `FETCH [HH:MM] latest=09:30 expected=09:30 clean=244 stale=4 incomplete=N` (`Fetch`) — live only; flags partial-candle data from Dhan. `incomplete=N` counts stocks whose currently-forming bar was stripped (see Candles section); a healthy run has `incomplete ≈ active_stocks` at every slot.
+- `Reject` events — per-stock, per-candle, per-rule. Detail strings are designed to be self-diagnosing on grep: e.g. R8-Gap embeds `open=X.XX prevClose=Y.YY` inline so a JSONL line tells the full story without cross-referencing.
+- `WHY ZERO: 7 slots × 248 stocks avg = 1736 checks. Dominant reject: R5-VolMult (1247×, 71%). <hint>` (`Diagnosis`) — only when 0 signals at end of day; consults `strategy.diagnosisHint(topReject)` for the hint text
+- `BREAKOUT (partial-bar): SYM bar=HH:MM high=X > Entry=Y — caught during fetch-delay window` (`Engine`) — live only; fires from Phase 0 of `_monitorBreakouts` when a breakout already happened during the slot's fetch loop. Distinguishes from `BREAKOUT: SYM LTP=X > Entry=Y` (Phase 1, continuous LTP poll).
 
 `_log()` in `StrategyEngine` and `BacktestEngine` mirrors every line to both `AppLogger` AND the run's `RunLoggerSession`, so the JSONL is a complete forensic record. The SCAN/PREMARKET/FETCH/WHY-ZERO events additionally emit structured `data` payloads alongside the human-readable `msg`.
 
