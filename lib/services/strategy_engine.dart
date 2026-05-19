@@ -340,6 +340,20 @@ class StrategyEngine {
     final allCandles = <Candle>[];
     final today = DateTime.now();
 
+    // The loop iterates daysBack = 1, 2, 3, ... so the FIRST successful fetch
+    // is for the most recent prior trading day — which is what R8-Gap needs
+    // for stats.prevClose. Capture its newest candle here.
+    //
+    // Earlier this took `allCandles.last.close`, which, because allCandles is
+    // built by appending each day's bars oldest-first in reverse-chronological
+    // iteration order, ended up being the OLDEST fetched day's last bar
+    // (i.e. ~14 calendar days ago). That blew the R8-Gap math for every stock
+    // — sometimes silently, sometimes loudly (MCX 2026-05-19 lost the trade
+    // to a fake -13% gap because prevClose was its 2026-05-05 close, not
+    // 2026-05-18's). Verified against Dhan's live API via
+    // dhan-api-probes/Probe-PrevCloseMismatch.ps1.
+    double? mostRecentClose;
+
     int fetched = 0;
     int daysBack = 0;
     int emptyDays = 0;
@@ -352,7 +366,11 @@ class StrategyEngine {
       try {
         final candles = await _fetchIntradayCandles(secId, '5', date: date);
         if (candles.isNotEmpty) {
-          allCandles.addAll(candles.reversed); // oldest first
+          // candles is newest-first per _parseCandles, so candles.first is
+          // the day's last 5-min bar. ??= ensures only the first successful
+          // (= most-recent) day's value wins.
+          mostRecentClose ??= candles.first.close;
+          allCandles.addAll(candles.reversed); // oldest first within the day
           fetched++;
         } else {
           emptyDays++;
@@ -373,7 +391,7 @@ class StrategyEngine {
 
     final avgVolume = allCandles.fold<double>(0, (sum, c) => sum + c.volume) / allCandles.length;
     final avgCandleSize = allCandles.fold<double>(0, (sum, c) => sum + (c.high - c.low)) / allCandles.length;
-    final prevClose = allCandles.last.close;
+    final prevClose = mostRecentClose ?? 0.0;
 
     return CandleStatsModel(
       securityId: secId,
