@@ -163,6 +163,7 @@ Two storage layers:
 - WebSocket feed URL: `wss://api-feed.dhan.co?version=2&token=…&clientId=…&authType=2`
 - Binary packet layout (little-endian): header 8 bytes `[code:u8][msgLen:u16][exchange:u8][securityId:i32]`, then payload varies by code (2=Ticker, 4=Quote, 6=PrevClose).
 - Rate limit error code `805` / `DH-904` = too many requests — retry with exponential backoff.
+- **`/v2/charts/intraday` omits the pre-open auction price on single-day queries.** Asking for a single date returns the first 5-min bar's `open` as the first regular-session trade — auction price is dropped. Asking for the same date as part of a multi-day window returns `open` = auction print (often making 09:15 a degenerate `open == high` bar). Dhan's own chart UI uses the multi-day shape. R8-Gap and any other rule that compares today's open vs prev-day close must use the multi-day shape, or live will see a different number than backtest (which already uses 90-day windows via `bulkFetch`). `StrategyEngine._fetchIntradayCandles` always queries with a 1-day-prior buffer and filters to the target date locally for this reason. Verified 2026-05-20: FIRSTCRY 09:15 single-day returned o=218.05; multi-day returned o=220.73; chart UI showed 220.73.
 
 ---
 

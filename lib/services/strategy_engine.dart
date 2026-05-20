@@ -1222,7 +1222,21 @@ class StrategyEngine {
   Future<List<Candle>> _fetchIntradayCandles(int secId, String interval, {DateTime? date}) async {
     await RateLimiter.instance.acquire(ApiCategory.data);
 
-    final dateStr = _formatDate(date ?? DateTime.now());
+    final targetDate = date ?? DateTime.now();
+    final dateStr = _formatDate(targetDate);
+    // Query Dhan with a 1-day buffer before the target date and filter to
+    // the target locally. Dhan's intraday endpoint OMITS the pre-open
+    // auction price when the query spans only a single date — e.g. asking
+    // for 2026-05-20 alone returned FIRSTCRY 09:15 open=218.05, but the same
+    // endpoint with a wider range returned open=220.73 (the auction print,
+    // which Dhan's own chart UI also displays). Backtest naturally gets the
+    // wide-range shape via bulkFetch's 90-day windows, so its R8-Gap saw the
+    // auction-inclusive open; live's single-day fetch did not, and the two
+    // disagreed on every day-open-sensitive rule. Verified against the API
+    // and Dhan chart screenshot 2026-05-20 (FIRSTCRY, TVSMOTOR).
+    final priorDate = targetDate.subtract(const Duration(days: 1));
+    final fromStr = '${_formatDate(priorDate)} 09:15:00';
+    final toStr = '$dateStr 15:30:00';
     final maxRetries = 3;
     var retryDelay = 2000;
 
@@ -1241,8 +1255,8 @@ class StrategyEngine {
             'instrument': 'EQUITY',
             'interval': interval,
             'oi': false,
-            'fromDate': '$dateStr 09:15:00',
-            'toDate': '$dateStr 15:30:00',
+            'fromDate': fromStr,
+            'toDate': toStr,
           }),
         ).timeout(const Duration(seconds: 15));
 
@@ -1276,7 +1290,14 @@ class StrategyEngine {
           return [];
         }
 
-        return _parseCandles(response.body);
+        // Filter to the requested date — the 2-day query above returns
+        // the prior day's candles too (needed only so Dhan includes the
+        // auction print at target-date 09:15); callers expect a single
+        // day's bars.
+        final parsed = _parseCandles(response.body);
+        return parsed
+            .where((c) => _formatDate(c.date) == dateStr)
+            .toList();
       } catch (e) {
         if (attempt == maxRetries) {
           _logOnce('Engine', 'ERROR: Candle fetch failed after $maxRetries retries for secId=$secId date=$dateStr: $e', 'fetch_exception');
