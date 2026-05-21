@@ -962,11 +962,17 @@ class StrategyEngine {
   // ── Monitor Open Positions ────────────────────────────────────────────
 
   Future<void> _monitorOpenPositions() async {
+    // Square off at 15:30 IST — same point in time as the backtest, which
+    // exits at the close of the last 5-min candle (15:25-15:30 bar). This
+    // used to be 15:15, which left a 15-minute window where backtest already
+    // had a final EOD price but live was still polling, so an end-of-day
+    // ACMESOLAR-style position got squared off with no real exit price
+    // (exitPrice was wrongly set to entryPrice, hiding the P&L).
     final marketClose = DateTime(
       DateTime.now().year,
       DateTime.now().month,
       DateTime.now().day,
-      15, 15, // 3:15 PM — square off time
+      15, 30,
     );
 
     while (!_stopRequested && DateTime.now().isBefore(marketClose)) {
@@ -987,7 +993,8 @@ class StrategyEngine {
             trade.exitPrice = trade.stopLoss;
             trade.exitTime = DateTime.now();
             trade.outcome = TradeOutcome.stopLoss;
-            _log('Engine', 'SL HIT: ${trade.symbol} @ ${trade.stopLoss}');
+            _log('Engine',
+                'SL HIT: ${trade.symbol} @ ${trade.stopLoss} P&L=₹${trade.pnl.toStringAsFixed(0)}');
             _sendTradeUpdate(trade, 'sl_hit');
           }
           // Check target
@@ -996,7 +1003,8 @@ class StrategyEngine {
             trade.exitPrice = trade.target;
             trade.exitTime = DateTime.now();
             trade.outcome = TradeOutcome.target;
-            _log('Engine', 'TARGET HIT: ${trade.symbol} @ ${trade.target}');
+            _log('Engine',
+                'TARGET HIT: ${trade.symbol} @ ${trade.target} P&L=₹${trade.pnl.toStringAsFixed(0)}');
             _sendTradeUpdate(trade, 'target_hit');
           }
         }
@@ -1008,15 +1016,33 @@ class StrategyEngine {
       await Future.delayed(const Duration(seconds: 3));
     }
 
-    // Square off remaining positions at market close
+    // Square off remaining positions at market close using the latest LTP
+    // as exit price, matching the backtest's "exit at last candle's close"
+    // semantics. Previously this set exitPrice = entryPrice (P&L = 0),
+    // silently dropping the actual EOD return for non-SL/Target exits.
     final remaining = _trades.where((t) => t.status == TradeStatus.open).toList();
     if (remaining.isNotEmpty && !_stopRequested) {
-      _log('Engine', 'Market closing — squaring off ${remaining.length} positions');
+      _log('Engine',
+          'Market closing — squaring off ${remaining.length} position(s)');
+      Map<int, double> ltpMap = const {};
+      try {
+        ltpMap = await _fetchLtpBatch(
+            remaining.map((t) => t.securityId).toList());
+      } catch (e) {
+        _log('Engine',
+            'EOD LTP fetch failed: $e — falling back to entry price (P&L will be 0)');
+      }
       for (final trade in remaining) {
+        final ltp = ltpMap[trade.securityId];
+        final exitPx = (ltp != null && ltp > 0) ? ltp : trade.entryPrice;
         trade.status = TradeStatus.closed;
-        trade.exitPrice = trade.entryPrice; // Will be updated with actual LTP
+        trade.exitPrice = exitPx;
         trade.exitTime = DateTime.now();
         trade.outcome = TradeOutcome.endOfDay;
+        _log('Engine',
+            'EOD EXIT: ${trade.symbol} @ ${exitPx.toStringAsFixed(2)} P&L=₹${trade.pnl.toStringAsFixed(0)}');
+        _addKeyEvent(
+            'EOD EXIT: ${trade.symbol} @ ${exitPx.toStringAsFixed(2)} P&L=₹${trade.pnl.toStringAsFixed(0)}');
         _sendTradeUpdate(trade, 'eod_exit');
       }
     }
