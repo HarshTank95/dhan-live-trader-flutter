@@ -53,6 +53,7 @@ Theme toggle is done via `MyApp.of(context).toggleTheme()` (propagates from root
 | Service | Role |
 |---|---|
 | `DhanService` | REST wrapper — OHLC/LTP polling, historical candles, holdings, funds |
+| `DhanAuthService` | Mints a fresh access token from Client ID + PIN + TOTP via `POST https://auth.dhan.co/app/generateAccessToken` (params as query string). Used by `TokenEntryScreen`'s "Generate token" mode so the user doesn't have to copy a token from the Dhan portal. Requires TOTP enabled on the account |
 | `DhanFeedService` | WebSocket live feed — binary protocol, little-endian, codes 2/4/6 |
 | `StrategyEngine` | Full trading workflow runner; lives in background isolate |
 | `StrategyBackgroundService` | Manages `flutter_background_service` isolate; exposes streams to UI |
@@ -173,7 +174,7 @@ All navigation is via `Navigator.push` with `MaterialPageRoute` (no named routes
 
 | Screen | Entry point | Notes |
 |---|---|---|
-| `TokenEntryScreen` | App start (no saved credentials), or re-auth from `LtpScreen` drawer | Saves clientId + accessToken via `StorageService` |
+| `TokenEntryScreen` | App start (no saved credentials), or re-auth from `LtpScreen` drawer | Saves clientId + accessToken via `StorageService`. Has a "Paste token" / "Generate token" segmented toggle: paste = manual token entry (original flow); generate = Client ID + PIN + TOTP → `DhanAuthService.generateAccessToken` mints + saves the token, then continues. PIN/TOTP are used once, never persisted |
 | `LtpScreen` | App start (credentials saved); `pushReplacement` from `TokenEntryScreen` after login | Main hub — watchlist with WebSocket feed, drawer navigation to all other screens |
 | `WatchlistManagerScreen` | From `LtpScreen` drawer | Create/delete/rename watchlists |
 | `WatchlistScreen` | From `WatchlistManagerScreen` | Stock-picker UI for editing one watchlist's contents |
