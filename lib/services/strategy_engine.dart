@@ -12,17 +12,20 @@ import '../models/strategy_config_model.dart';
 import '../models/strategy_signal_model.dart';
 import '../models/strategy_trade_model.dart';
 import '../services/app_logger.dart';
+import '../services/candle_sanitizer.dart';
 import '../services/rate_limiter.dart';
 import '../services/run_logger.dart';
 import '../services/scrip_service.dart';
 import '../services/storage_service.dart';
 import '../strategies/base_strategy.dart';
 import '../strategies/dominance_breakout_strategy.dart';
+import '../strategies/strategy_registry.dart';
+import '../strategies/strategy_engine_context.dart';
 
 /// Callback to send status updates back to the UI (via background service).
 typedef EngineCallback = void Function(String event, Map<String, dynamic> data);
 
-/// The Strategy Engine — orchestrates the complete trading workflow:
+/// The Strategy Engine â€” orchestrates the complete trading workflow:
 ///   1. Load instruments (Nifty 500)
 ///   2. Pre-market: fetch historical data, compute metrics
 ///   3. Progressive candle fetching at scan intervals (9:20-10:00)
@@ -33,7 +36,7 @@ typedef EngineCallback = void Function(String event, Map<String, dynamic> data);
 ///   8. Auto-stop after market close / screening end
 ///
 /// Runs entirely in the background isolate. Uses REST APIs only (no WebSocket
-/// in isolate — Dhan WebSocket needs single connection, REST is simpler here).
+/// in isolate â€” Dhan WebSocket needs single connection, REST is simpler here).
 class StrategyEngine {
   final String clientId;
   final String accessToken;
@@ -60,7 +63,7 @@ class StrategyEngine {
   bool _running = false;
   bool _stopRequested = false;
   String _startTime = '';
-  // Cap raised from 50 → 100: per-slot SCAN diagnostics fill the log faster
+  // Cap raised from 50 â†’ 100: per-slot SCAN diagnostics fill the log faster
   // than the legacy event mix and the history sheet needs room to display
   // them alongside trades/exits.
   static const int _maxKeyEvents = 100;
@@ -74,7 +77,7 @@ class StrategyEngine {
   // Nifty 500 security IDs loaded from scrip master
   List<int> _securityIds = [];
 
-  // API rate limiting — uses global RateLimiter.instance
+  // API rate limiting â€” uses global RateLimiter.instance
 
   StrategyEngine({
     required this.clientId,
@@ -85,7 +88,12 @@ class StrategyEngine {
 
   bool get isRunning => _running;
 
-  /// Main entry point — runs the complete strategy workflow.
+  // Final active-stock count reported by a self-contained strategy (its stats
+  // live in the strategy, not in _stockMetrics). Used for the run summary.
+  int? _customActiveStocks;
+  int get _finalActiveStocks => _customActiveStocks ?? _stockMetrics.length;
+
+  /// Main entry point â€” runs the complete strategy workflow.
   Future<void> run() async {
     if (_running) return;
     _running = true;
@@ -115,7 +123,7 @@ class StrategyEngine {
         startTime: _startTime,
       );
 
-      _log('Engine', '═══ STRATEGY ENGINE STARTING ═══');
+      _log('Engine', 'â•â•â• STRATEGY ENGINE STARTING â•â•â•');
       _log('Engine', 'Strategy: ${config.name}');
       _log('Engine', 'Mode: ${config.paperTrading ? "PAPER" : "LIVE"}');
       _log('Engine', 'Config ID: ${config.id}');
@@ -130,27 +138,39 @@ class StrategyEngine {
 
       _addKeyEvent('Loaded ${_securityIds.length} instruments');
 
-      // Step 2: Pre-market data loading (historical candles → metrics)
-      _sendUpdate('phase', {'phase': 'preparing', 'message': 'Loading historical data...'});
-      await _loadPreMarketData();
-      if (_stopRequested) { endStatus = 'stopped'; return; }
+      // A self-contained strategy (hasCustomEngine) runs its own full session
+      // â€” pre-market, screening, entry and exit â€” through the engine faÃ§ade.
+      // Dominance (and any scanâ†’breakout strategy) uses the built-in path.
+      final customStrategy = StrategyRegistry.create(config.strategyType);
+      if (customStrategy != null && customStrategy.hasCustomEngine) {
+        _sendUpdate('phase',
+            {'phase': 'preparing', 'message': 'Preparing strategy...'});
+        await customStrategy.runLive(_LiveEngineCtx(this));
+        if (_stopRequested) { endStatus = 'stopped'; return; }
+      } else {
+        // Step 2: Pre-market data loading (historical candles â†’ metrics)
+        _sendUpdate('phase',
+            {'phase': 'preparing', 'message': 'Loading historical data...'});
+        await _loadPreMarketData();
+        if (_stopRequested) { endStatus = 'stopped'; return; }
 
-      _log('Engine', 'Pre-market data loaded for ${_stockMetrics.length} stocks');
-      _addKeyEvent('Pre-market data loaded for ${_stockMetrics.length} stocks');
-      _sendUpdate('phase', {
-        'phase': 'prepared',
-        'message': '${_stockMetrics.length} stocks ready',
-        'stockCount': _stockMetrics.length,
-      });
+        _log('Engine', 'Pre-market data loaded for ${_stockMetrics.length} stocks');
+        _addKeyEvent('Pre-market data loaded for ${_stockMetrics.length} stocks');
+        _sendUpdate('phase', {
+          'phase': 'prepared',
+          'message': '${_stockMetrics.length} stocks ready',
+          'stockCount': _stockMetrics.length,
+        });
 
-      // Step 3: Wait for market and run progressive screening
-      await _runProgressiveScreening();
-      if (_stopRequested) { endStatus = 'stopped'; return; }
+        // Step 3: Wait for market and run progressive screening
+        await _runProgressiveScreening();
+        if (_stopRequested) { endStatus = 'stopped'; return; }
+      }
 
       // Step 4: Generate summary
       _generateSummary();
 
-      _log('Engine', '═══ STRATEGY ENGINE COMPLETE ═══');
+      _log('Engine', 'â•â•â• STRATEGY ENGINE COMPLETE â•â•â•');
       _sendUpdate('completed', {
         'message': 'Strategy completed for today',
         'trades': _trades.length,
@@ -179,7 +199,7 @@ class StrategyEngine {
         signals: _totalSignalsGenerated,
         trades: _trades.length,
         totalStocks: _securityIds.length,
-        finalActiveStocks: _stockMetrics.length,
+        finalActiveStocks: _finalActiveStocks,
         totalPnl: totalPnl,
       );
     }
@@ -192,7 +212,7 @@ class StrategyEngine {
     _running = false;
   }
 
-  // ── Step 1: Load Instruments ──────────────────────────────────────────
+  // â”€â”€ Step 1: Load Instruments â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   Future<void> _loadInstruments() async {
     _log('Engine', 'Step 1: Loading instruments...');
@@ -216,7 +236,7 @@ class StrategyEngine {
     });
   }
 
-  // ── Step 2: Pre-Market Data Loading ───────────────────────────────────
+  // â”€â”€ Step 2: Pre-Market Data Loading â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   Future<void> _loadPreMarketData() async {
     final days = (config.params['historicalDays'] as num?)?.toInt() ?? 10;
@@ -274,20 +294,20 @@ class StrategyEngine {
     if (failed > 0 && success == 0) {
       // Build actionable error message from what _logOnce captured
       final causes = <String>[];
-      if (_loggedOnce.contains('auth_fail')) causes.add('ACCESS TOKEN EXPIRED — generate a new token on Dhan developer portal');
-      if (_loggedOnce.contains('rate_429') || _loggedOnce.contains('dhan_805') || _loggedOnce.contains('dhan_DH-904')) causes.add('RATE LIMITED — too many API calls, try increasing delay');
-      if (_loggedOnce.contains('fetch_exception')) causes.add('NETWORK ERROR — check internet connection');
-      if (causes.isEmpty) causes.add('ALL DATES RETURNED EMPTY — possible market holiday week or API issue');
+      if (_loggedOnce.contains('auth_fail')) causes.add('ACCESS TOKEN EXPIRED â€” generate a new token on Dhan developer portal');
+      if (_loggedOnce.contains('rate_429') || _loggedOnce.contains('dhan_805') || _loggedOnce.contains('dhan_DH-904')) causes.add('RATE LIMITED â€” too many API calls, try increasing delay');
+      if (_loggedOnce.contains('fetch_exception')) causes.add('NETWORK ERROR â€” check internet connection');
+      if (causes.isEmpty) causes.add('ALL DATES RETURNED EMPTY â€” possible market holiday week or API issue');
 
       _log('Engine', 'CRITICAL: ALL $failed stocks failed pre-market data load! 0 candidates will be found.');
       _log('Engine', 'CRITICAL: Root cause: ${causes.join(" | ")}');
-      _log('Engine', 'CRITICAL: FIX → ${causes.first.split(" — ").last}');
+      _log('Engine', 'CRITICAL: FIX â†’ ${causes.first.split(" â€” ").last}');
     }
 
     // Remove security IDs that have no metrics
     _securityIds = _securityIds.where((id) => _stockMetrics.containsKey(id)).toList();
 
-    // ── PREMARKET QUALITY summary ─────────────────────────────────────────
+    // â”€â”€ PREMARKET QUALITY summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // If a chunk of stocks have garbage averages (avgVol == 0 or tiny), the
     // dominance rules will silently reject every one. Surfacing this in
     // both the activity log and the run JSONL makes that case obvious.
@@ -313,7 +333,7 @@ class StrategyEngine {
         'badZeroVol': badZero,
       });
 
-      // Per-stock prevClose snapshot — written to JSONL only (no activity-log
+      // Per-stock prevClose snapshot â€” written to JSONL only (no activity-log
       // noise). Lets devs `grep <SYMBOL>` in the run log to see the exact
       // prevClose live used, then diff against backtest's snapshot to confirm
       // whether a stock's R8-Gap reject was driven by a data-source mismatch
@@ -341,14 +361,14 @@ class StrategyEngine {
     final today = DateTime.now();
 
     // The loop iterates daysBack = 1, 2, 3, ... so the FIRST successful fetch
-    // is for the most recent prior trading day — which is what R8-Gap needs
+    // is for the most recent prior trading day â€” which is what R8-Gap needs
     // for stats.prevClose. Capture its newest candle here.
     //
     // Earlier this took `allCandles.last.close`, which, because allCandles is
     // built by appending each day's bars oldest-first in reverse-chronological
     // iteration order, ended up being the OLDEST fetched day's last bar
     // (i.e. ~14 calendar days ago). That blew the R8-Gap math for every stock
-    // — sometimes silently, sometimes loudly (MCX 2026-05-19 lost the trade
+    // â€” sometimes silently, sometimes loudly (MCX 2026-05-19 lost the trade
     // to a fake -13% gap because prevClose was its 2026-05-05 close, not
     // 2026-05-18's). Verified against Dhan's live API via
     // dhan-api-probes/Probe-PrevCloseMismatch.ps1.
@@ -381,9 +401,9 @@ class StrategyEngine {
     }
 
     if (allCandles.isEmpty) {
-      // Only log first stock's breakdown to avoid spam — _logOnce ensures one entry
+      // Only log first stock's breakdown to avoid spam â€” _logOnce ensures one entry
       _logOnce('Engine',
-          'DEBUG: First stock failure breakdown — $symbol: emptyDays=$emptyDays, errorDays=$errorDays, daysChecked=$daysBack '
+          'DEBUG: First stock failure breakdown â€” $symbol: emptyDays=$emptyDays, errorDays=$errorDays, daysChecked=$daysBack '
           '(empty=API returned no candles for that date, error=network/API exception)',
           'first_stock_fail');
       return null;
@@ -403,7 +423,7 @@ class StrategyEngine {
     );
   }
 
-  // ── Step 3: Progressive Candle Fetching & Screening ───────────────────
+  // â”€â”€ Step 3: Progressive Candle Fetching & Screening â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   Future<void> _runProgressiveScreening() async {
     _log('Engine', 'Step 3: Starting progressive screening...');
@@ -475,13 +495,13 @@ class StrategyEngine {
       final toRemove = <int>[];
       // Track the most-recent candle time across all stocks fetched this slot.
       // If "latest" lags behind the expected just-closed candle by more than
-      // one bar, Dhan's backend hasn't finalised the bar yet — the dominance
+      // one bar, Dhan's backend hasn't finalised the bar yet â€” the dominance
       // rules will likely reject it on partial volume.
       int? latestCandleMinute;
-      final staleHistogram = <int, int>{}; // minutes-of-day → count
+      final staleHistogram = <int, int>{}; // minutes-of-day â†’ count
 
       // Slot minute used to strip Dhan's currently-forming bar. When we fetch
-      // at e.g. 09:20:05 Dhan returns the just-opened 09:20–09:25 bar with
+      // at e.g. 09:20:05 Dhan returns the just-opened 09:20â€“09:25 bar with
       // only seconds of trade data; treating that as a closed candle made the
       // volume filter and dominance rules see flat near-zero bars and falsely
       // reject ~60% of the universe. Backtest never hit this because cached
@@ -539,7 +559,7 @@ class StrategyEngine {
         }
       }
 
-      // ── FETCH freshness diagnostic (file log only — too noisy for activity)
+      // â”€â”€ FETCH freshness diagnostic (file log only â€” too noisy for activity)
       if (latestCandleMinute != null) {
         // Expected: the candle that just closed = screenTime - scanInterval.
         // At slot 9:35, expected latest = 9:30 candle (start time 9:30).
@@ -572,9 +592,9 @@ class StrategyEngine {
         activeIds.removeWhere((id) => toRemove.contains(id));
         _log('Engine',
           'Eliminated $totalElim stocks at ${screenTime.hour}:${screenTime.minute.toString().padLeft(2, "0")} '
-          '— LowVolume: $elimLowVol, NoData: $elimNoData, ApiError: $elimApiErr. '
+          'â€” LowVolume: $elimLowVol, NoData: $elimNoData, ApiError: $elimApiErr. '
           'Remaining: ${activeIds.length}');
-        _addKeyEvent('Eliminated $totalElim (Vol:$elimLowVol NoData:$elimNoData Err:$elimApiErr) → ${activeIds.length} remaining');
+        _addKeyEvent('Eliminated $totalElim (Vol:$elimLowVol NoData:$elimNoData Err:$elimApiErr) â†’ ${activeIds.length} remaining');
       }
 
       // Screen for dominance candles (only from scanStartTime onwards, C#: 9:35)
@@ -612,7 +632,7 @@ class StrategyEngine {
     }
   }
 
-  // ── Dominance Candle Screening ────────────────────────────────────────
+  // â”€â”€ Dominance Candle Screening â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   void _screenForDominance({String? slotLabel}) {
     final strategy = DominanceBreakoutStrategy();
@@ -636,7 +656,7 @@ class StrategyEngine {
       ),
     );
 
-    // ── Per-slot structured SCAN summary ──────────────────────────────────
+    // â”€â”€ Per-slot structured SCAN summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // The single most useful line for "why did this day produce 0 signals":
     // it shows how many stocks even reached the rules and which rule killed
     // them. Goes to both the activity log (compact summary in history view)
@@ -673,7 +693,7 @@ class StrategyEngine {
       _totalSignalsGenerated++;
       final sigTime = '${signal.timestamp.hour.toString().padLeft(2, '0')}:${signal.timestamp.minute.toString().padLeft(2, '0')}';
       final expTime = '${signal.expiryTime.hour.toString().padLeft(2, '0')}:${signal.expiryTime.minute.toString().padLeft(2, '0')}';
-      _log('Engine', 'DOMINANCE FOUND: ${signal.symbol} Break=${signal.entryPrice} SL=${signal.stopLoss} Window=$sigTime→$expTime');
+      _log('Engine', 'DOMINANCE FOUND: ${signal.symbol} Break=${signal.entryPrice} SL=${signal.stopLoss} Window=$sigTimeâ†’$expTime');
       _addKeyEvent('DOMINANCE: ${signal.symbol} Break=${signal.entryPrice}');
 
       _sendUpdate('signal_found', {
@@ -733,7 +753,7 @@ class StrategyEngine {
     }
   }
 
-  // ── Breakout Monitoring (REST LTP polling) ────────────────────────────
+  // â”€â”€ Breakout Monitoring (REST LTP polling) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   Future<void> _monitorBreakouts() async {
     if (_activeSignals.isEmpty) return;
@@ -741,7 +761,7 @@ class StrategyEngine {
 
     final maxTrades = (config.params['maxTradesPerDay'] as num?)?.toInt() ?? 2;
     if (_tradesPlacedToday >= maxTrades) {
-      _log('Engine', 'Max trades ($maxTrades) reached — skipping breakout monitor');
+      _log('Engine', 'Max trades ($maxTrades) reached â€” skipping breakout monitor');
       return;
     }
 
@@ -757,17 +777,17 @@ class StrategyEngine {
     int expiries = 0;
     int partialBarHits = 0;
 
-    // ── Phase 0: catch breakouts that happened DURING the slot fetch delay.
+    // â”€â”€ Phase 0: catch breakouts that happened DURING the slot fetch delay.
     //
     // The slot fetch can take ~3 min when rate-limited at 5 req/sec across
     // 350+ stocks. By the time we enter this monitor, the bar *after* the
     // dominance candle has been forming for those 3 minutes. Its rolling
-    // "high" already reflects any tick that touched entry — the per-second
+    // "high" already reflects any tick that touched entry â€” the per-second
     // LTP loop below would miss this because LTP is a point-in-time snapshot.
     //
     // Re-fetch each signal's intraday data and inspect bars AFTER the
     // dominance candle. If any of them already broke above entry, enter
-    // immediately at the dominance price (the breakout happened — we just
+    // immediately at the dominance price (the breakout happened â€” we just
     // weren't watching). Restricting to post-dominance bars avoids a
     // false-trigger from an earlier intraday spike whose high was unrelated
     // to the dominance pattern.
@@ -780,7 +800,7 @@ class StrategyEngine {
         if (candles.isEmpty) continue;
 
         // candles are newest-first per _parseCandles. Find the dominance
-        // candle by OHLC fingerprint — its index splits the list into
+        // candle by OHLC fingerprint â€” its index splits the list into
         // post-dominance (newer, indices < dominanceIdx) and pre-dominance
         // (older, > dominanceIdx).
         int dominanceIdx = -1;
@@ -816,7 +836,7 @@ class StrategyEngine {
           final barLabel =
               '${breakBar.date.hour.toString().padLeft(2, "0")}:${breakBar.date.minute.toString().padLeft(2, "0")}';
           _log('Engine',
-              'BREAKOUT (partial-bar): ${signal.symbol} bar=$barLabel high=${breakBar.high} > Entry=${signal.entryPrice} — caught during fetch-delay window');
+              'BREAKOUT (partial-bar): ${signal.symbol} bar=$barLabel high=${breakBar.high} > Entry=${signal.entryPrice} â€” caught during fetch-delay window');
 
           final trade = _calculateTrade(signal, breakBar.high);
           if (trade != null) {
@@ -852,12 +872,12 @@ class StrategyEngine {
 
     if (_activeSignals.isEmpty || _tradesPlacedToday >= maxTrades) {
       _log('Engine',
-          'Breakout monitor done (partial-bar phase): candidates=$startCount entered=$partialBarHits — skipping LTP poll loop');
+          'Breakout monitor done (partial-bar phase): candidates=$startCount entered=$partialBarHits â€” skipping LTP poll loop');
       return;
     }
 
     // Loop until every signal has either entered, expired, or we hit maxTrades.
-    // Previously this was a single LTP snapshot per slot — if the breakout
+    // Previously this was a single LTP snapshot per slot â€” if the breakout
     // happened in between two slot ticks (which is most of the breakout
     // window, since slots are 5 min apart), live missed it while the backtest
     // saw the bar's full high and entered. Now we poll continuously; the
@@ -911,7 +931,7 @@ class StrategyEngine {
 
           if (DateTime.now().isAfter(signal.expiryTime)) {
             _log('Engine',
-                'EXPIRED: ${signal.symbol} — no breakout before ${signal.expiryTime}, can be re-screened (polls=$polls)');
+                'EXPIRED: ${signal.symbol} â€” no breakout before ${signal.expiryTime}, can be re-screened (polls=$polls)');
             _activeSignals.remove(signal);
             _alreadySignalled.remove(signal.securityId);
             expiries++;
@@ -959,10 +979,10 @@ class StrategyEngine {
     );
   }
 
-  // ── Monitor Open Positions ────────────────────────────────────────────
+  // â”€â”€ Monitor Open Positions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   Future<void> _monitorOpenPositions() async {
-    // Square off at 15:30 IST — same point in time as the backtest, which
+    // Square off at 15:30 IST â€” same point in time as the backtest, which
     // exits at the close of the last 5-min candle (15:25-15:30 bar). This
     // used to be 15:15, which left a 15-minute window where backtest already
     // had a final EOD price but live was still polling, so an end-of-day
@@ -994,7 +1014,7 @@ class StrategyEngine {
             trade.exitTime = DateTime.now();
             trade.outcome = TradeOutcome.stopLoss;
             _log('Engine',
-                'SL HIT: ${trade.symbol} @ ${trade.stopLoss} P&L=₹${trade.pnl.toStringAsFixed(0)}');
+                'SL HIT: ${trade.symbol} @ ${trade.stopLoss} P&L=â‚¹${trade.pnl.toStringAsFixed(0)}');
             _sendTradeUpdate(trade, 'sl_hit');
           }
           // Check target
@@ -1004,7 +1024,7 @@ class StrategyEngine {
             trade.exitTime = DateTime.now();
             trade.outcome = TradeOutcome.target;
             _log('Engine',
-                'TARGET HIT: ${trade.symbol} @ ${trade.target} P&L=₹${trade.pnl.toStringAsFixed(0)}');
+                'TARGET HIT: ${trade.symbol} @ ${trade.target} P&L=â‚¹${trade.pnl.toStringAsFixed(0)}');
             _sendTradeUpdate(trade, 'target_hit');
           }
         }
@@ -1023,14 +1043,14 @@ class StrategyEngine {
     final remaining = _trades.where((t) => t.status == TradeStatus.open).toList();
     if (remaining.isNotEmpty && !_stopRequested) {
       _log('Engine',
-          'Market closing — squaring off ${remaining.length} position(s)');
+          'Market closing â€” squaring off ${remaining.length} position(s)');
       Map<int, double> ltpMap = const {};
       try {
         ltpMap = await _fetchLtpBatch(
             remaining.map((t) => t.securityId).toList());
       } catch (e) {
         _log('Engine',
-            'EOD LTP fetch failed: $e — falling back to entry price (P&L will be 0)');
+            'EOD LTP fetch failed: $e â€” falling back to entry price (P&L will be 0)');
       }
       for (final trade in remaining) {
         final ltp = ltpMap[trade.securityId];
@@ -1040,9 +1060,9 @@ class StrategyEngine {
         trade.exitTime = DateTime.now();
         trade.outcome = TradeOutcome.endOfDay;
         _log('Engine',
-            'EOD EXIT: ${trade.symbol} @ ${exitPx.toStringAsFixed(2)} P&L=₹${trade.pnl.toStringAsFixed(0)}');
+            'EOD EXIT: ${trade.symbol} @ ${exitPx.toStringAsFixed(2)} P&L=â‚¹${trade.pnl.toStringAsFixed(0)}');
         _addKeyEvent(
-            'EOD EXIT: ${trade.symbol} @ ${exitPx.toStringAsFixed(2)} P&L=₹${trade.pnl.toStringAsFixed(0)}');
+            'EOD EXIT: ${trade.symbol} @ ${exitPx.toStringAsFixed(2)} P&L=â‚¹${trade.pnl.toStringAsFixed(0)}');
         _sendTradeUpdate(trade, 'eod_exit');
       }
     }
@@ -1062,7 +1082,7 @@ class StrategyEngine {
     });
   }
 
-  // ── Live Order Placement ──────────────────────────────────────────────
+  // â”€â”€ Live Order Placement â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   Future<void> _placeLiveOrder(StrategyTradeModel trade) async {
     try {
@@ -1112,7 +1132,7 @@ class StrategyEngine {
     }
   }
 
-  // ── Summary ───────────────────────────────────────────────────────────
+  // â”€â”€ Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   void _generateSummary() {
     final totalTrades = _trades.length;
@@ -1120,14 +1140,14 @@ class StrategyEngine {
     final losers = _trades.where((t) => t.pnl < 0).length;
     final totalPnl = _trades.fold<double>(0, (sum, t) => sum + t.pnl);
 
-    _log('Engine', '═══ END OF DAY SUMMARY ═══');
+    _log('Engine', 'â•â•â• END OF DAY SUMMARY â•â•â•');
     _log('Engine', 'Dominance Candidates: ${_alreadySignalled.length}');
     _log('Engine', 'Total Trades: $totalTrades');
     _log('Engine', 'Winners: $winners | Losers: $losers');
     _log('Engine', 'Total P&L: Rs ${totalPnl.toStringAsFixed(2)}');
-    _log('Engine', '═══════════════════════════');
+    _log('Engine', 'â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
 
-    // ── WHY ZERO diagnostic ─────────────────────────────────────────────
+    // â”€â”€ WHY ZERO diagnostic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Emit a "why nothing fired" line in the activity log when a run ends
     // with zero dominance candidates. This is the line a developer wants
     // to see in history weeks later when troubleshooting a flat day.
@@ -1142,7 +1162,7 @@ class StrategyEngine {
         diagnosis =
             'No candles ever reached the scan window. Likely cause: scan window misconfigured OR Dhan API returned no fresh candles before each slot fired.';
       } else if (sortedRej.isEmpty) {
-        diagnosis = 'Scan window had candles but no rejects recorded — internal logic gap, please review.';
+        diagnosis = 'Scan window had candles but no rejects recorded â€” internal logic gap, please review.';
       } else {
         final top = sortedRej.first;
         final pct = totalRej > 0 ? (top.value * 100 / totalRej).round() : 0;
@@ -1151,11 +1171,11 @@ class StrategyEngine {
         final hint = DominanceBreakoutStrategy().diagnosisHint(top.key) ??
             'See per-stock REJECT lines in run log for detail.';
         diagnosis =
-            'Dominant reject: ${top.key} (${top.value}×, $pct%). $hint';
+            'Dominant reject: ${top.key} (${top.value}Ã—, $pct%). $hint';
       }
 
       final summary =
-          'WHY ZERO: $_totalScanSlots scan slots × ${(_totalStocksEvaluated / _totalScanSlots).round()} stocks avg = $_totalCandlesEvaluated candle-checks. $diagnosis';
+          'WHY ZERO: $_totalScanSlots scan slots Ã— ${(_totalStocksEvaluated / _totalScanSlots).round()} stocks avg = $_totalCandlesEvaluated candle-checks. $diagnosis';
       _log('Engine', summary);
       _addKeyEvent(summary);
       _runLog?.warn('Diagnosis', summary, {
@@ -1170,7 +1190,7 @@ class StrategyEngine {
   }
 
 
-  // ── Save trades to SharedPreferences ──────────────────────────────────
+  // â”€â”€ Save trades to SharedPreferences â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   Future<void> _saveTrades() async {
     try {
@@ -1196,7 +1216,7 @@ class StrategyEngine {
     }
   }
 
-  // ── Key Events (for daily history) ──────────────────────────────────
+  // â”€â”€ Key Events (for daily history) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   void _addKeyEvent(String event) {
     final now = DateTime.now();
@@ -1205,7 +1225,7 @@ class StrategyEngine {
     if (_keyEvents.length > _maxKeyEvents) _keyEvents.removeAt(0);
   }
 
-  // ── Save Daily Run Summary ─────────────────────────────────────────
+  // â”€â”€ Save Daily Run Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   Future<void> _saveDailyRunSummary(String status) async {
     try {
@@ -1224,7 +1244,7 @@ class StrategyEngine {
         strategyType: config.strategyType,
         paperTrading: config.paperTrading,
         totalStocks: _securityIds.length,
-        finalActiveStocks: _stockMetrics.length,
+        finalActiveStocks: _finalActiveStocks,
         dominanceCandidates: _totalSignalsGenerated,
         totalTrades: _trades.length,
         winners: winners,
@@ -1243,7 +1263,7 @@ class StrategyEngine {
     }
   }
 
-  // ── API Helpers ───────────────────────────────────────────────────────
+  // â”€â”€ API Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   Future<List<Candle>> _fetchIntradayCandles(int secId, String interval, {DateTime? date}) async {
     await RateLimiter.instance.acquire(ApiCategory.data);
@@ -1252,7 +1272,7 @@ class StrategyEngine {
     final dateStr = _formatDate(targetDate);
     // Query Dhan with a 1-day buffer before the target date and filter to
     // the target locally. Dhan's intraday endpoint OMITS the pre-open
-    // auction price when the query spans only a single date — e.g. asking
+    // auction price when the query spans only a single date â€” e.g. asking
     // for 2026-05-20 alone returned FIRSTCRY 09:15 open=218.05, but the same
     // endpoint with a wider range returned open=220.73 (the auction print,
     // which Dhan's own chart UI also displays). Backtest naturally gets the
@@ -1294,10 +1314,10 @@ class StrategyEngine {
           continue;
         }
         if (response.statusCode == 401 || response.statusCode == 403) {
-          _logOnce('Engine', 'ERROR: Auth failed (${response.statusCode}) fetching candles — access token may be expired. Body: ${response.body.length > 200 ? response.body.substring(0, 200) : response.body}', 'auth_fail');
+          _logOnce('Engine', 'ERROR: Auth failed (${response.statusCode}) fetching candles â€” access token may be expired. Body: ${response.body.length > 200 ? response.body.substring(0, 200) : response.body}', 'auth_fail');
           return [];
         }
-        // Dhan error 805 — too many requests
+        // Dhan error 805 â€” too many requests
         if (response.statusCode != 200) {
           try {
             final errBody = jsonDecode(response.body);
@@ -1309,14 +1329,14 @@ class StrategyEngine {
               continue;
             }
             // Log unexpected API errors
-            _logOnce('Engine', 'ERROR: Candle API HTTP ${response.statusCode} for secId=$secId date=$dateStr — ${response.body.length > 200 ? response.body.substring(0, 200) : response.body}', 'http_${response.statusCode}');
+            _logOnce('Engine', 'ERROR: Candle API HTTP ${response.statusCode} for secId=$secId date=$dateStr â€” ${response.body.length > 200 ? response.body.substring(0, 200) : response.body}', 'http_${response.statusCode}');
           } catch (_) {
             _logOnce('Engine', 'ERROR: Candle API HTTP ${response.statusCode} for secId=$secId date=$dateStr (unparseable body)', 'http_${response.statusCode}');
           }
           return [];
         }
 
-        // Filter to the requested date — the 2-day query above returns
+        // Filter to the requested date â€” the 2-day query above returns
         // the prior day's candles too (needed only so Dhan includes the
         // auction print at target-date 09:15); callers expect a single
         // day's bars.
@@ -1400,14 +1420,17 @@ class StrategyEngine {
       ));
     }
 
+    // Parse boundary — every API response is sanitized (dedupe + validity)
+    // before any strategy logic sees it. See CandleSanitizer.
+    final clean = CandleSanitizer.sanitize(candles, context: 'live intraday');
     // candlesticks package expects newest first
-    return candles.reversed.toList();
+    return clean.reversed.toList();
   }
 
   String _formatDate(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
-  // ── Logging & Updates ─────────────────────────────────────────────────
+  // â”€â”€ Logging & Updates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   void _log(String tag, String msg) {
     debugPrint('[$tag] $msg');
@@ -1423,7 +1446,7 @@ class StrategyEngine {
     } catch (_) {}
     // Mirror every engine line into the per-run JSONL so the run log is a
     // complete forensic record. Structured payloads (SCAN, FETCH, WHY ZERO)
-    // emit their own _runLog entries with the `data` field — those calls
+    // emit their own _runLog entries with the `data` field â€” those calls
     // intentionally remain alongside this mirror for richer detail.
     try {
       final level = msg.startsWith('ERROR') || msg.startsWith('FATAL')
@@ -1441,7 +1464,7 @@ class StrategyEngine {
     } catch (_) {}
   }
 
-  /// Log a message only once per key — prevents log spam during pre-market loading
+  /// Log a message only once per key â€” prevents log spam during pre-market loading
   final _loggedOnce = <String>{};
   void _logOnce(String tag, String msg, String key) {
     if (_loggedOnce.contains(key)) return;
@@ -1454,4 +1477,63 @@ class StrategyEngine {
       onUpdate(event, data);
     } catch (_) {}
   }
+}
+
+/// Façade over [StrategyEngine] handed to self-contained strategies so they can
+/// drive a full live/paper session without touching engine internals.
+class _LiveEngineCtx implements LiveEngineContext {
+  final StrategyEngine _e;
+  _LiveEngineCtx(this._e);
+
+  @override
+  Map<String, dynamic> get params => _e.config.params;
+  @override
+  List<int> get securityIds => _e._securityIds;
+  @override
+  ScripService get scripService => _e._scripService;
+  @override
+  String get accessToken => _e.accessToken;
+  @override
+  String get clientId => _e.clientId;
+  @override
+  String get configId => _e.config.id;
+  @override
+  bool get isPaperTrading => _e.config.paperTrading;
+  @override
+  bool get stopRequested => _e._stopRequested;
+  @override
+  int get tradesPlacedToday => _e._tradesPlacedToday;
+
+  @override
+  Future<List<Candle>> fetchIntraday(int securityId, String interval,
+          {DateTime? date}) =>
+      _e._fetchIntradayCandles(securityId, interval, date: date);
+  @override
+  Future<Map<int, double>> fetchLtpBatch(List<int> securityIds) =>
+      _e._fetchLtpBatch(securityIds);
+  @override
+  Future<void> placeLiveOrder(StrategyTradeModel trade) =>
+      _e._placeLiveOrder(trade);
+
+  @override
+  void log(String message) => _e._log('Engine', message);
+  @override
+  void addKeyEvent(String event) => _e._addKeyEvent(event);
+  @override
+  void runLogInfo(String tag, String message, [Map<String, dynamic>? data]) =>
+      _e._runLog?.info(tag, message, data);
+  @override
+  void sendUpdate(String event, Map<String, dynamic> data) =>
+      _e._sendUpdate(event, data);
+
+  @override
+  void recordSignal() => _e._totalSignalsGenerated++;
+  @override
+  void recordTrade(StrategyTradeModel trade) {
+    _e._trades.add(trade);
+    _e._tradesPlacedToday++;
+  }
+
+  @override
+  void recordActiveStocks(int count) => _e._customActiveStocks = count;
 }

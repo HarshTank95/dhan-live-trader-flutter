@@ -59,10 +59,11 @@ Theme toggle is done via `MyApp.of(context).toggleTheme()` (propagates from root
 | `StrategyBackgroundService` | Manages `flutter_background_service` isolate; exposes streams to UI |
 | `PaperTradingService` | **Singleton** — paper portfolio state (positions, trades, balance) |
 | `StorageService` | All app-state persistence via `SharedPreferences` (paper, strategy, watchlists, credentials) |
-| `CandleRepository` | **Singleton** — SQLite-backed candle cache (`candle_cache.db`); used by `BacktestEngine` |
-| `ScripService` | Instrument master — fetches from Dhan API, caches to file |
+| `CandleRepository` | **Singleton** — SQLite-backed candle cache (`candle_cache.db`). Intraday (`bulkFetch`) and **daily** (`bulkFetchDaily`, interval `1day`, `expiryCode=0`, IST-dated) ranges, cache-first. All parse/merge boundaries pass through `CandleSanitizer` |
+| `CandleSanitizer` | Single choke point for candle quality — dedupe-by-timestamp (first wins, matching the SQLite PK) + OHLC validity + sort. Every API parse and cache+fetch merge calls it, so strategies can assume unique/valid/sorted bars. Fixed real data-quality bugs (Dhan duplicate bars corrupting next-bar entry & exit walks) |
+| `ScripService` | Instrument master — fetches from Dhan API, caches to file. Loud diagnostics on failure (an empty master cripples watchlist/search/universe) |
 | `RateLimiter` | **Singleton** — sliding-window rate limiter; must be called before every API request |
-| `BacktestEngine` | Generic backtest runner — pulls historical candles from `CandleRepository`, simulates each trading day |
+| `BacktestEngine` | Generic backtest runner. **Chunked sliding-window**: processes ~28-day calendar chunks (pre-roll = strategy history) — fetch chunk → simulate days → free memory → next. Same per-day view as a whole-range load, so results are identical; bounded memory for multi-year runs. Streams live running totals to the progress UI. Delegates to the strategy for `hasCustomEngine` types |
 | `AppLogger` | File-based logger (`app_log.txt` in app docs dir); must call `AppLogger.init()` in each isolate separately |
 | `RunLogger` | Per-run structured logger — writes JSONL + `.meta.json` files under `{appDocs}/strategy_logs/`; one file per live engine run AND per backtest. Survives `app_log.txt` rolling. `RunLogger.cleanup(retentionDays:)` runs on app start |
 | `StrategyReminderService` | Local notifications (`flutter_local_notifications`) for strategy reminders |
@@ -80,13 +81,31 @@ await RateLimiter.instance.acquire(ApiCategory.data);   // chart endpoints (5 re
 
 ### Strategy System
 
-`BaseStrategy` defines a 4-method interface (`prepare`, `scan`, `checkBreakout`, `checkExit`) — but **the live `StrategyEngine` only uses `scan()`**. It has its own inline pre-market loading, REST-based breakout polling, and SL/target monitoring. `checkBreakout` and `checkExit` are implemented on `DominanceBreakoutStrategy` but never called by the live engine. Keep this in mind before adding a new strategy — you'll likely need to modify `StrategyEngine` itself, not just register a new class.
+`StrategyRegistry` (`strategies/strategy_registry.dart`) maps type strings to factories. Two strategies are registered:
+- **`dominance_breakout`** — `DominanceBreakoutStrategy`, the original C# port. 8-rule dominance candle 9:35–10:00, LTP breakout above the dominance high, fixed ₹ risk/target.
+- **`hammer_dominance_s1`** — `HammerDominanceStrategy`, the focus of recent work (see below).
 
-`StrategyRegistry` (`strategies/strategy_registry.dart`) maps type strings (e.g. `'dominance_breakout'`) to factories. **However**, `StrategyEngine._screenForDominance()` directly instantiates `DominanceBreakoutStrategy()` — it does NOT consult the registry. The registry is currently used by config/list screens for metadata, not by the engine.
+`StrategyConfigScreen` auto-generates its parameter form from `BaseStrategy.paramDefinitions` — no manual form code when adding params. The backtest config screen overlays a saved config's params on top of the strategy's current `defaultParams`, so **editing a default in code only affects NEW configs** — change an existing card's value via Edit, or delete + re-add it.
 
-**Only strategy implemented:** `DominanceBreakoutStrategy` — port of a C# screener. Detects 8-rule dominance candles from 9:35–10:00, enters on LTP breakout above dominance high, sizes position by fixed ₹ risk (SL) and fixed ₹ target.
+#### Two engine shapes (`BaseStrategy.hasCustomEngine`)
 
-`StrategyConfigScreen` auto-generates its parameter form from `BaseStrategy.paramDefinitions` — no manual form code needed when adding params to a strategy.
+`BaseStrategy` has the legacy 4-method interface (`prepare`/`scan`/`checkBreakout`/`checkExit`) used by the dominance pipeline, AND an optional **self-contained-engine** path for strategies whose shape doesn't fit it:
+
+- `hasCustomEngine == false` (dominance): the built-in engine drives everything. The live `StrategyEngine` only uses `scan()` + its own inline pre-market/LTP-poll/exit loop; the backtest engine runs its inline `_simulateDay`.
+- `hasCustomEngine == true` (hammer, future strategies): the engines delegate to `prepareBacktest()` / `backtestDay()` / `runLive()`, passing a context façade (`strategies/strategy_engine_context.dart`: `BacktestPrepContext` / `BacktestDayContext` / `LiveEngineContext`). The strategy owns its full screening, entry, exit and logging; the engines stay strategy-agnostic. **A new self-contained strategy = new class (set `hasCustomEngine`, implement the 3 hooks) + one registry line. Zero engine edits.**
+
+#### `HammerDominanceStrategy` (`hammer_dominance_s1`)
+
+Port of the C# "Hammer/Dominance (Long) — S1" preset, then **tuned in-app** with offline mining. *The level is the edge; the candle is the trigger; the break is the proof.* A hammer or green-dominance candle probes an Indian intraday support level — CPR/vCPR, floor pivots P/S2 (S1-pivot & PDH excluded as mined losers), PDL/PDC, Camarilla L3, round numbers, 60-day reactive-swing zones, and **rising daily trendlines projected to today** (`computeTrendlines`, price×time) — closes back above it, and the *next* candle must break the trigger's high (buy-stop fill). 09:30–12:00 IST. Needs daily candles (support levels; look-ahead-safe — prior days only).
+
+In-app tuning vs the C# defaults (each split-validated train/test; 1-year Nifty-500 in-sample ₹14.9k → ₹47.3k, ~3.2×):
+- **Exit** (`trailActivateR` 1.0→**2.5**, `trailGapR` 1.0→**0.75**): the 1R/1R trail locked breakeven too early and choked winners; grid-search found an interior optimum that lets winners run, then protects tight. ~2× alone. (Set 1.0/1.0 for C#-parity.)
+- **Gap filter** (`gapRejectLowPct` 0.3 / `gapRejectHighPct` 1.0 → `gapRejected()`): skips the "weak gap-up" day band (open +0.3–1.0% vs prior close) — a single cohort that lost −₹17k at 30% win while flat/gap-down/big-gap days won.
+- `maxRangeMultVsPrevDay` defaults **0** (C# configures 4.0 but never executes it — a C# bug; validated C# results ran with it inert).
+
+Per-trade **mining payload** is logged on every backtest trade (`Trade` tag in the run JSONL): pattern, matched levels, confluence, support distance, stop %, gap %, exit kind (stop/trail/target/time), **MFE/MAE in R**, and volume/day-type context (rel-vol prior-6, rel-vol day, 20-day avg vol, CPR width). This is what the exit/filter tuning was mined from — an offline simulator (`node:sqlite` over `candle_cache.db` + the JSONL) replays exit variants and reproduces the live engine within ₹2/trade.
+
+> The fixed-target **S2** variant was removed (registry-only; the class machinery was collapsed to S1). Re-add by reintroducing a variant + registry line.
 
 ---
 
@@ -185,9 +204,10 @@ All navigation is via `Navigator.push` with `MaterialPageRoute` (no named routes
 | `StrategyConfigScreen` | From `StrategyListScreen` (new / edit) | Form auto-generated from `BaseStrategy.paramDefinitions` |
 | `StrategyDashboardScreen` | From `StrategyListScreen` (run) | Live phase/candidate/trade view; observes `WidgetsBinding` lifecycle to call `flushNow()` on pause |
 | `StrategyHistoryScreen` | From `StrategyDashboardScreen` | Past `DailyRunSummaryModel` entries |
-| `BacktestConfigScreen` | From `StrategyListScreen` | Configure backtest range and params |
-| `BacktestProgressScreen` | From `BacktestConfigScreen` | Live backtest progress bar |
-| `BacktestResultsScreen` | From `BacktestProgressScreen` | Results display (P&L, day-by-day) |
+| `BacktestConfigScreen` | From `StrategyListScreen` (⋮ → Backtest) | Configure backtest range; receives the selected `StrategyConfigModel` so it backtests the chosen strategy with its params |
+| `BacktestProgressScreen` | From `BacktestConfigScreen` | Live progress (phase chips + running totals); instantiates the strategy via the registry |
+| `BacktestResultsScreen` | From `BacktestProgressScreen` or a history card | Results display (P&L, day-by-day) |
+| `BacktestHistoryScreen` | History icon in `StrategyListScreen` app bar | Browsable list of past backtest runs (persisted by `StorageService`, max 20). Tap a card → `BacktestResultsScreen`; swipe to delete |
 | `LogViewerScreen` | From `LtpScreen` drawer | Two-tab viewer: **App** (flat `app_log.txt`) + **Runs** (per-run JSONL list, retention picker, delete-all). Tap a run row → `RunLogDetailScreen` |
 | `RunLogDetailScreen` | From Runs tab in `LogViewerScreen` OR "View full logs" button on the `StrategyHistoryScreen` detail sheet | Single-run JSONL viewer. Tag chips are **derived from loaded events** (frequency-sorted), not a static list — any new strategy emitting its own tag gets a chip for free. Level filter (Info+/Warn+/Error), search, share-as-JSONL |
 

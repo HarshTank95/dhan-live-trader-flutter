@@ -1,4 +1,4 @@
-enum SignalType { dominanceCandle, breakout, expired }
+enum SignalType { dominanceCandle, breakout, expired, gapFade }
 
 class StrategySignalModel {
   final String id;

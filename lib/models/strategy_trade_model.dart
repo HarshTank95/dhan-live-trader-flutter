@@ -26,6 +26,11 @@ class StrategyTradeModel {
   final double stopLoss;
   final double target;
 
+  /// Round-trip transaction cost as % of leg notional (brokerage + STT +
+  /// exchange + GST + stamp + slippage). 0 = gross P&L (dominance default).
+  /// Gap Fade sets 0.10% to match the C# net-of-cost benchmark.
+  final double costModelPct;
+
   StrategyTradeModel({
     required this.id,
     required this.strategyConfigId,
@@ -43,13 +48,17 @@ class StrategyTradeModel {
     this.outcome = TradeOutcome.none,
     required this.stopLoss,
     required this.target,
+    this.costModelPct = 0,
   });
 
   // Computed
   double get pnl {
     final exit = exitPrice ?? 0;
     if (status == TradeStatus.closed && exit > 0) {
-      return (exit - entryPrice) * quantity;
+      final gross = (exit - entryPrice) * quantity;
+      // Cost on both legs: (entry + exit) × qty × pct / 200 (pct is round-trip).
+      final cost = (entryPrice + exit) * quantity * costModelPct / 200.0;
+      return gross - cost;
     }
     return 0;
   }
@@ -83,6 +92,7 @@ class StrategyTradeModel {
         'outcome': outcome.name,
         'stopLoss': stopLoss,
         'target': target,
+        'costModelPct': costModelPct,
       };
 
   factory StrategyTradeModel.fromJson(Map<String, dynamic> json) =>
@@ -111,5 +121,6 @@ class StrategyTradeModel {
             TradeOutcome.values.firstWhere((e) => e.name == json['outcome']),
         stopLoss: (json['stopLoss'] as num).toDouble(),
         target: (json['target'] as num).toDouble(),
+        costModelPct: (json['costModelPct'] as num?)?.toDouble() ?? 0,
       );
 }

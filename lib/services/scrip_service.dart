@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../data/nifty500_stocks.dart';
+import 'app_logger.dart';
 
 // ── Segment enum ─────────────────────────────────────────────────────────────
 
@@ -164,6 +165,16 @@ class ScripService {
       // Last resort: use stale cache
       final cached = await _loadFromFile(_cacheFile);
       if (cached != null) _scrips = cached;
+    }
+
+    // Loud diagnostics: an empty scrip master cripples the whole app (watchlist
+    // shows raw IDs, search finds nothing, strategies have no universe). This
+    // failed silently once after a reinstall wiped the cache — never again.
+    if (_scrips.isEmpty) {
+      AppLogger.error('Scrip',
+          'Scrip master EMPTY after load: auth endpoint + public CSV + cache all failed. Watchlist/search/universe will not work. Check token validity and network, then restart.');
+    } else {
+      AppLogger.info('Scrip', 'Scrip master loaded: ${_scrips.length} equities');
     }
 
     // Load F&O
@@ -488,9 +499,14 @@ class ScripService {
           'Accept': 'text/csv',
         },
       ).timeout(const Duration(seconds: 15));
-      if (response.statusCode != 200) return [];
+      if (response.statusCode != 200) {
+        AppLogger.error('Scrip',
+            'NSE_EQ instrument endpoint HTTP ${response.statusCode}: ${response.body.length > 150 ? response.body.substring(0, 150) : response.body}');
+        return [];
+      }
       return _parseEquityCsv(response.body);
-    } catch (_) {
+    } catch (e) {
+      AppLogger.error('Scrip', 'NSE_EQ instrument fetch failed: $e');
       return [];
     }
   }
@@ -507,9 +523,14 @@ class ScripService {
           'Accept': 'text/csv',
         },
       ).timeout(const Duration(seconds: 30));
-      if (response.statusCode != 200) return [];
+      if (response.statusCode != 200) {
+        AppLogger.error('Scrip',
+            'NSE_FNO instrument endpoint HTTP ${response.statusCode}');
+        return [];
+      }
       return _parseFnoCsv(response.body);
-    } catch (_) {
+    } catch (e) {
+      AppLogger.error('Scrip', 'NSE_FNO instrument fetch failed: $e');
       return [];
     }
   }
@@ -520,9 +541,14 @@ class ScripService {
       final response = await http
           .get(Uri.parse(_fallbackUrl))
           .timeout(const Duration(seconds: 30));
-      if (response.statusCode != 200) return [];
+      if (response.statusCode != 200) {
+        AppLogger.error(
+            'Scrip', 'Public scrip-master CSV HTTP ${response.statusCode}');
+        return [];
+      }
       return _parseEquityCsv(response.body);
-    } catch (_) {
+    } catch (e) {
+      AppLogger.error('Scrip', 'Public scrip-master CSV fetch failed: $e');
       return [];
     }
   }

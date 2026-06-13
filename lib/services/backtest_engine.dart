@@ -10,6 +10,7 @@ import '../services/candle_repository.dart';
 import '../services/run_logger.dart';
 import '../services/scrip_service.dart';
 import '../strategies/base_strategy.dart';
+import '../strategies/strategy_engine_context.dart';
 
 /// Progress callback for backtest phases.
 typedef BacktestProgressCallback = void Function(
@@ -85,14 +86,11 @@ class BacktestEngine {
       kind: 'backtest',
     );
 
-    // ── Phase 1: Download all candle data ──────────────────────────
-    onProgress?.call('download', 0, securityIds.length, 'Starting data download...');
     _log('═══ BACKTEST STARTING ═══');
     _log('Strategy: ${strategy.displayName}');
     _log('Period: ${_fmt(fromDate)} → ${_fmt(toDate)}');
     _log('Universe: $stockUniverseLabel (${securityIds.length} stocks)');
-    _log('Risk: ₹${params['fixedStopLoss']} | Target: ₹${params['fixedTarget']} | Max trades/day: ${params['maxTradesPerDay']}');
-    _log('Downloading candle data for ${securityIds.length} stocks...');
+    _log('Risk: ₹${params['riskPerTrade'] ?? params['fixedStopLoss']} | Max trades/day: ${params['maxTradesPerDay']}');
     _runLog?.info('Backtest', 'Backtest started', {
       'strategy': strategy.type,
       'fromDate': _fmt(fromDate),
@@ -103,104 +101,163 @@ class BacktestEngine {
       'params': params,
     });
 
-    // We need candles from (fromDate - historicalDays - buffer) to toDate
-    // The extra days are for computing stats (avgVolume, avgCandleSize)
-    final dataStartDate = fromDate.subtract(Duration(days: historicalDays + 20));
-
-    final allCandleData = await CandleRepository.instance.bulkFetch(
-      securityIds: securityIds,
-      fromDate: dataStartDate,
-      toDate: toDate,
-      interval: params['candleInterval'] as String? ?? '5',
-      accessToken: accessToken,
-      clientId: clientId,
-      onProgress: (completed, total, status) {
-        onProgress?.call('download', completed, total, status);
-      },
-      onLog: (msg) => _log(msg),
-      isCancelled: () => _cancelled,
-    );
-
-    if (_cancelled) {
-      final r = _emptyResult(fromDate, toDate, stockUniverseLabel, stopwatch);
-      await _closeBacktestLog(r, 'cancelled');
-      return r;
-    }
-
-    _log('Download complete. Got data for ${allCandleData.length} stocks.');
-
-    // ── Phase 2: Group candles by date per stock ───────────────────
-    onProgress?.call('prepare', 0, 1, 'Organizing candle data...');
-
-    // Build per-stock, per-date candle map
-    final stockDateCandles = <int, Map<String, List<Candle>>>{};
-    for (final entry in allCandleData.entries) {
-      final secId = entry.key;
-      final candles = entry.value;
-      final byDate = <String, List<Candle>>{};
-      for (final c in candles) {
-        final dateStr = _fmt(c.date);
-        byDate.putIfAbsent(dateStr, () => []).add(c);
+    // ── Phase 1: strategy-specific whole-run preparation ────────────
+    // Self-contained strategies fetch whatever range-wide data they need here
+    // (e.g. the hammer strategies' DAILY candles for support levels — small:
+    // one bar per stock-day). Dominance is a no-op.
+    if (strategy.hasCustomEngine) {
+      onProgress?.call('download', 0, securityIds.length, 'Preparing strategy data...');
+      await strategy.prepareBacktest(
+          _BtPrepContext(this, fromDate, toDate, () => _cancelled));
+      if (_cancelled) {
+        final r = _emptyResult(fromDate, toDate, stockUniverseLabel, stopwatch);
+        await _closeBacktestLog(r, 'cancelled');
+        return r;
       }
-      stockDateCandles[secId] = byDate;
     }
 
-    // ── Phase 3: Collect all trading days in range ─────────────────
-    final tradingDays = <String>[];
-    var d = fromDate;
-    while (!d.isAfter(toDate)) {
+    // ── Phase 2: chunked sliding-window simulation ──────────────────
+    //
+    // A whole-range load (500 stocks × 1 year ≈ 9M candle objects) gets the
+    // app killed by Android's low-memory killer. But each simulated day only
+    // ever needs TODAY's bars plus the strategy's short history window
+    // (`historicalDays`). So the range is processed in calendar chunks: fetch
+    // chunk + pre-roll (cache-first — overlap re-reads come from SQLite, not
+    // the API), simulate the chunk's days, append results, FREE the chunk,
+    // move on. Day-level simulation code is untouched, and every day sees the
+    // identical prior-N-days context it saw under the whole-range load, so
+    // results are bit-for-bit the same — only peak memory changes.
+    //
+    // This is strategy-agnostic: custom-engine strategies receive the same
+    // windowed per-day view through BacktestDayContext.
+    const chunkCalendarDays = 28; // ~20 trading days per chunk
+    // Pre-roll must cover `historicalDays` TRADING days of context before the
+    // first simulated day of each chunk (weekends/holidays ≈ ×7/5 + cushion).
+    final preRollCalendarDays = historicalDays * 2 + 15;
+    final interval = params['candleInterval'] as String? ?? '5';
+
+    // Progress denominator: weekday count over the range (close enough — the
+    // true trading-day count is only known once each chunk's data arrives).
+    int estTotalDays = 0;
+    for (var d = fromDate; !d.isAfter(toDate); d = d.add(const Duration(days: 1))) {
       if (d.weekday != DateTime.saturday && d.weekday != DateTime.sunday) {
-        final dateStr = _fmt(d);
-        // Only include days where at least some stocks have data
-        final hasData = stockDateCandles.values.any((m) => m.containsKey(dateStr));
-        if (hasData) tradingDays.add(dateStr);
+        estTotalDays++;
       }
-      d = d.add(const Duration(days: 1));
     }
+    final totalChunks =
+        ((toDate.difference(fromDate).inDays + 1) / chunkCalendarDays).ceil();
+    _log('Chunked run: $totalChunks chunk(s) × ~$chunkCalendarDays days, pre-roll $preRollCalendarDays days');
 
-    _log('Trading days in range: ${tradingDays.length}');
-
-    // ── Phase 4: Simulate each trading day ─────────────────────────
     final dayResults = <BacktestDayResult>[];
+    int daysDone = 0;
+    int runTrades = 0;
+    double runPnl = 0;
 
-    for (int dayIdx = 0; dayIdx < tradingDays.length; dayIdx++) {
+    var chunkStart = fromDate;
+    int chunkIdx = 0;
+    while (!chunkStart.isAfter(toDate) && !_cancelled) {
+      chunkIdx++;
+      var chunkEnd = chunkStart.add(const Duration(days: chunkCalendarDays - 1));
+      if (chunkEnd.isAfter(toDate)) chunkEnd = toDate;
+
+      // Fetch this chunk's window (pre-roll + chunk). Cache-first: data the
+      // previous chunk already fetched loads from SQLite without API calls.
+      onProgress?.call('download', 0, securityIds.length,
+          'Chunk $chunkIdx/$totalChunks · downloading ${_fmt(chunkStart)} → ${_fmt(chunkEnd)}...');
+      final chunkData = await CandleRepository.instance.bulkFetch(
+        securityIds: securityIds,
+        fromDate: chunkStart.subtract(Duration(days: preRollCalendarDays)),
+        toDate: chunkEnd,
+        interval: interval,
+        accessToken: accessToken,
+        clientId: clientId,
+        onProgress: (completed, total, status) {
+          onProgress?.call('download', completed, total,
+              'Chunk $chunkIdx/$totalChunks · $status');
+        },
+        onLog: (msg) => _log(msg),
+        isCancelled: () => _cancelled,
+      );
       if (_cancelled) break;
 
-      final dateStr = tradingDays[dayIdx];
-      onProgress?.call(
-        'simulate',
-        dayIdx + 1,
-        tradingDays.length,
-        'Simulating $dateStr (${dayIdx + 1}/${tradingDays.length})',
-      );
-
-      final dayResult = _simulateDay(
-        dateStr: dateStr,
-        stockDateCandles: stockDateCandles,
-        historicalDays: historicalDays,
-      );
-
-      dayResults.add(dayResult);
-
-      // Yield to event loop so UI stays responsive
-      await Future.delayed(Duration.zero);
-
-      // Log day summary if it had activity
-      if (dayResult.dominanceSignals > 0 || dayResult.tradesEntered > 0) {
-        _log('$dateStr: ${dayResult.dominanceSignals} signals, '
-            '${dayResult.tradesEntered} trades, '
-            'P&L: ₹${dayResult.dayPnl.toStringAsFixed(0)}');
+      // Group by date, consuming the flat lists as we go (single copy).
+      final stockDateCandles = <int, Map<String, List<Candle>>>{};
+      for (final secId in chunkData.keys.toList()) {
+        final candles = chunkData.remove(secId)!;
+        final byDate = <String, List<Candle>>{};
+        for (final c in candles) {
+          byDate.putIfAbsent(_fmt(c.date), () => []).add(c);
+        }
+        stockDateCandles[secId] = byDate;
       }
-      _runLog?.info('Backtest', 'Day complete', {
-        'date': dateStr,
-        'stocksScanned': dayResult.stocksScanned,
-        'stocksAfterElim': dayResult.stocksAfterElimination,
-        'signals': dayResult.dominanceSignals,
-        'trades': dayResult.tradesEntered,
-        'wins': dayResult.wins,
-        'losses': dayResult.losses,
-        'dayPnl': dayResult.dayPnl,
-      });
+
+      // Trading days to SIMULATE in this chunk (pre-roll days are context only).
+      final chunkDays = <String>[];
+      for (var d = chunkStart; !d.isAfter(chunkEnd); d = d.add(const Duration(days: 1))) {
+        if (d.weekday == DateTime.saturday || d.weekday == DateTime.sunday) {
+          continue;
+        }
+        final dateStr = _fmt(d);
+        if (stockDateCandles.values.any((m) => m.containsKey(dateStr))) {
+          chunkDays.add(dateStr);
+        }
+      }
+      _log('Chunk $chunkIdx/$totalChunks: ${chunkDays.length} trading day(s)');
+
+      for (final dateStr in chunkDays) {
+        if (_cancelled) break;
+
+        final dayResult = strategy.hasCustomEngine
+            ? (strategy.backtestDay(
+                    _BtDayContext(this, dateStr, stockDateCandles)) ??
+                _emptyDay(dateStr))
+            : _simulateDay(
+                dateStr: dateStr,
+                stockDateCandles: stockDateCandles,
+                historicalDays: historicalDays,
+              );
+
+        dayResults.add(dayResult);
+        daysDone++;
+        runTrades += dayResult.tradesEntered;
+        runPnl += dayResult.dayPnl;
+
+        // Progressive results: the UI shows live running totals instead of a
+        // frozen bar on long runs.
+        onProgress?.call(
+          'simulate',
+          daysDone,
+          estTotalDays,
+          '$dateStr · $runTrades trades · '
+          '${runPnl >= 0 ? "+" : ""}₹${runPnl.toStringAsFixed(0)} '
+          '(chunk $chunkIdx/$totalChunks)',
+        );
+
+        // Yield to event loop so UI stays responsive
+        await Future.delayed(Duration.zero);
+
+        // Log day summary if it had activity
+        if (dayResult.dominanceSignals > 0 || dayResult.tradesEntered > 0) {
+          _log('$dateStr: ${dayResult.dominanceSignals} signals, '
+              '${dayResult.tradesEntered} trades, '
+              'P&L: ₹${dayResult.dayPnl.toStringAsFixed(0)}');
+        }
+        _runLog?.info('Backtest', 'Day complete', {
+          'date': dateStr,
+          'stocksScanned': dayResult.stocksScanned,
+          'stocksAfterElim': dayResult.stocksAfterElimination,
+          'signals': dayResult.dominanceSignals,
+          'trades': dayResult.tradesEntered,
+          'wins': dayResult.wins,
+          'losses': dayResult.losses,
+          'dayPnl': dayResult.dayPnl,
+        });
+      }
+
+      // FREE this chunk's candles before fetching the next one — this is the
+      // whole point of chunking: peak memory is one window, not the range.
+      stockDateCandles.clear();
+      chunkStart = chunkEnd.add(const Duration(days: 1));
     }
 
     // ── Phase 5: Aggregate results ─────────────────────────────────
@@ -234,7 +291,7 @@ class BacktestEngine {
     }
 
     _log('═══ BACKTEST COMPLETE ═══');
-    _log('Trading days: ${tradingDays.length} | Signals: $totalSignals | Trades: $totalTrades');
+    _log('Trading days: ${dayResults.length} | Signals: $totalSignals | Trades: $totalTrades');
     _log('Wins: $wins | Losses: $losses | Win rate: ${totalTrades > 0 ? (wins / totalTrades * 100).toStringAsFixed(1) : 0}%');
     _log('Total P&L: ₹${totalPnl.toStringAsFixed(0)} | Max Drawdown: ₹${maxDrawdown.toStringAsFixed(0)}');
     _log('Duration: ${stopwatch.elapsed.inSeconds}s');
@@ -248,7 +305,7 @@ class BacktestEngine {
       stockUniverseSize: securityIds.length,
       stockUniverseLabel: stockUniverseLabel,
       durationSeconds: stopwatch.elapsed.inSeconds,
-      totalTradingDays: tradingDays.length,
+      totalTradingDays: dayResults.length,
       daysWithSignals: daysWithSignals,
       daysWithTrades: daysWithTrades,
       totalSignals: totalSignals,
@@ -671,6 +728,18 @@ class BacktestEngine {
     );
   }
 
+  BacktestDayResult _emptyDay(String dateStr) => BacktestDayResult(
+        date: dateStr,
+        stocksScanned: 0,
+        stocksAfterElimination: 0,
+        dominanceSignals: 0,
+        tradesEntered: 0,
+        wins: 0,
+        losses: 0,
+        dayPnl: 0,
+        trades: const [],
+      );
+
   // ── Trade Creation ──────────────────────────────────────────────────
 
   StrategyTradeModel? _createTrade(
@@ -743,4 +812,58 @@ class BacktestEngine {
 
   String _fmt(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+}
+
+/// Backtest prep services exposed to a self-contained strategy.
+class _BtPrepContext implements BacktestPrepContext {
+  final BacktestEngine _e;
+  @override
+  final DateTime fromDate;
+  @override
+  final DateTime toDate;
+  final bool Function() _cancelledFn;
+  _BtPrepContext(this._e, this.fromDate, this.toDate, this._cancelledFn);
+
+  @override
+  Map<String, dynamic> get params => _e.params;
+  @override
+  List<int> get securityIds => _e.securityIds;
+  @override
+  String get accessToken => _e.accessToken;
+  @override
+  String get clientId => _e.clientId;
+  @override
+  bool get isCancelled => _cancelledFn();
+  @override
+  void log(String message) => _e._log(message);
+  @override
+  void progress(int completed, int total, String message) =>
+      _e.onProgress?.call('download', completed, total, message);
+}
+
+/// Per-day backtest services exposed to a self-contained strategy.
+class _BtDayContext implements BacktestDayContext {
+  final BacktestEngine _e;
+  @override
+  final String dateStr;
+  final Map<int, Map<String, List<Candle>>> _stockDateCandles;
+  _BtDayContext(this._e, this.dateStr, this._stockDateCandles);
+
+  @override
+  Map<String, dynamic> get params => _e.params;
+  @override
+  List<int> get securityIds => _e.securityIds;
+  @override
+  ScripService get scripService => _e.scripService;
+  @override
+  Map<String, List<Candle>>? intradayByDate(int securityId) =>
+      _stockDateCandles[securityId];
+  @override
+  void log(String message) => _e._log(message);
+  @override
+  void runLogInfo(String tag, String message, [Map<String, dynamic>? data]) =>
+      _e._runLog?.info(tag, message, data);
+  @override
+  void runLogWarn(String tag, String message, [Map<String, dynamic>? data]) =>
+      _e._runLog?.warn(tag, message, data);
 }
