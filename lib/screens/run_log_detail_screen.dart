@@ -252,12 +252,16 @@ class _RunLogDetailScreenState extends State<RunLogDetailScreen> {
         children: [
           Row(
             children: [
-              Text(m.configName,
-                  style: const TextStyle(
-                      fontSize: 14, fontWeight: FontWeight.bold)),
+              Expanded(
+                child: Text(m.configName,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.bold)),
+              ),
               const SizedBox(width: 6),
               _MetaKindChip(meta: m),
-              const Spacer(),
+              const SizedBox(width: 6),
               Text(m.status,
                   style: TextStyle(
                       fontSize: 11,

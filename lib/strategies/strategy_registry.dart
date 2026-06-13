@@ -1,5 +1,6 @@
 import 'base_strategy.dart';
 import 'dominance_breakout_strategy.dart';
+import 'hammer_dominance_strategy.dart';
 
 /// Registry of all available strategy types.
 /// To add a new strategy: create the class, then register it here.
@@ -8,9 +9,7 @@ class StrategyRegistry {
 
   static void init() {
     register('dominance_breakout', () => DominanceBreakoutStrategy());
-    // Future strategies:
-    // register('orb', () => OpeningRangeBreakoutStrategy());
-    // register('vwap_reversal', () => VwapReversalStrategy());
+    register('hammer_dominance_s1', () => HammerDominanceStrategy());
   }
 
   static void register(String type, BaseStrategy Function() factory) {

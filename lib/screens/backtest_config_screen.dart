@@ -1,16 +1,23 @@
 import 'package:flutter/material.dart';
+import '../models/strategy_config_model.dart';
 import '../services/rate_limiter.dart';
 import '../services/scrip_service.dart';
+import '../strategies/strategy_registry.dart';
 import 'backtest_progress_screen.dart';
 
 class BacktestConfigScreen extends StatefulWidget {
   final String accessToken;
   final String clientId;
 
+  /// The strategy config being backtested. When provided, its strategyType +
+  /// params drive the backtest. When null, falls back to dominance defaults.
+  final StrategyConfigModel? config;
+
   const BacktestConfigScreen({
     super.key,
     required this.accessToken,
     required this.clientId,
+    this.config,
   });
 
   @override
@@ -27,8 +34,11 @@ class _BacktestConfigScreenState extends State<BacktestConfigScreen> {
   String _universe = 'Nifty 500';
   int _universeSize = 500;
 
-  // Strategy params (using defaults)
-  final Map<String, dynamic> _params = {
+  // Strategy + params. Driven by the passed config; defaults to dominance.
+  late String _strategyType;
+  late Map<String, dynamic> _params;
+
+  static const Map<String, dynamic> _dominanceDefaults = {
     'historicalDays': 10,
     'candleInterval': '5',
     'scanStartHour': 9,
@@ -52,6 +62,21 @@ class _BacktestConfigScreenState extends State<BacktestConfigScreen> {
   };
 
   @override
+  void initState() {
+    super.initState();
+    final cfg = widget.config;
+    _strategyType = cfg?.strategyType ?? 'dominance_breakout';
+    // Start from the strategy's own defaults, then overlay the config's saved
+    // params so backtest uses exactly what the live config uses.
+    final strat = StrategyRegistry.create(_strategyType);
+    final base = <String, dynamic>{
+      ...(strat?.defaultParams ?? _dominanceDefaults),
+    };
+    if (cfg != null) base.addAll(cfg.params);
+    _params = base;
+  }
+
+  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final stats = RateLimiter.instance.stats;
@@ -59,7 +84,10 @@ class _BacktestConfigScreenState extends State<BacktestConfigScreen> {
     final canRun = estimatedCalls <= stats.dataCallsRemaining;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Backtest Setup')),
+      appBar: AppBar(
+          title: Text(widget.config != null
+              ? 'Backtest: ${widget.config!.name}'
+              : 'Backtest Setup')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -99,12 +127,16 @@ class _BacktestConfigScreenState extends State<BacktestConfigScreen> {
 
           const SizedBox(height: 24),
 
-          // Position Sizing Section
+          // Position Sizing Section — rows render only when the key exists in
+          // the active strategy's params (dominance uses fixedStopLoss/Target,
+          // hammer uses riskPerTrade; all other knobs are edited on the
+          // strategy's own config screen).
           _sectionHeader('Position Sizing', Icons.attach_money),
           const SizedBox(height: 8),
           _buildParamRow('Stop Loss (INR)', 'fixedStopLoss', 100, 5000, 'INR'),
           _buildParamRow('Target (INR)', 'fixedTarget', 100, 10000, 'INR'),
-          _buildParamRow('Max Trades/Day', 'maxTradesPerDay', 1, 10, ''),
+          _buildParamRow('Risk per Trade (INR)', 'riskPerTrade', 100, 5000, 'INR'),
+          _buildParamRow('Max Trades/Day', 'maxTradesPerDay', 1, 50, ''),
 
           const SizedBox(height: 24),
 
@@ -225,7 +257,11 @@ class _BacktestConfigScreenState extends State<BacktestConfigScreen> {
 
   Widget _buildParamRow(
       String label, String key, double min, double max, String unit) {
-    final value = (_params[key] as num).toDouble();
+    // Strategies have different param sets — skip rows whose key the active
+    // strategy doesn't define (fixes a Null-cast crash for non-dominance).
+    final raw = _params[key];
+    if (raw is! num) return const SizedBox.shrink();
+    final value = raw.toDouble();
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -355,6 +391,7 @@ class _BacktestConfigScreenState extends State<BacktestConfigScreen> {
           stockUniverseLabel: _universe,
           securityIds: securityIds,
           params: Map.from(_params),
+          strategyType: _strategyType,
         ),
       ),
     );

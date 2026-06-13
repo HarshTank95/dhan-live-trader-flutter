@@ -9,6 +9,7 @@ import '../services/strategy_reminder_service.dart';
 import '../strategies/base_strategy.dart';
 import '../strategies/strategy_registry.dart';
 import 'backtest_config_screen.dart';
+import 'backtest_history_screen.dart';
 import 'strategy_config_screen.dart';
 import 'strategy_dashboard_screen.dart';
 
@@ -182,40 +183,59 @@ class _StrategyListScreenState extends State<StrategyListScreen>
 
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true, // allow the sheet to grow / scroll
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (_) => Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 40, height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade300,
-                  borderRadius: BorderRadius.circular(2),
+      builder: (ctx) => ConstrainedBox(
+        // Cap at 80% of screen; the strategy list inside scrolls if longer.
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(ctx).size.height * 0.8,
+        ),
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+              20, 12, 20, 12 + MediaQuery.of(ctx).padding.bottom),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40, height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 16),
-            const Text('Choose Strategy Type',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12),
-            ...strategies.map((s) => ListTile(
-                  leading: const Icon(Icons.bolt, color: Colors.blue),
-                  title: Text(s.displayName,
-                      style: const TextStyle(fontWeight: FontWeight.w600)),
-                  subtitle: Text(s.description, style: const TextStyle(fontSize: 12)),
-                  onTap: () {
-                    Navigator.pop(context);
-                    _createForType(s);
-                  },
-                )),
-            const SizedBox(height: 8),
-          ],
+              const SizedBox(height: 16),
+              const Text('Choose Strategy Type',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              // Scrollable list — won't overflow no matter how many strategies
+              // or how long their descriptions get.
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: strategies
+                      .map((s) => ListTile(
+                            leading:
+                                const Icon(Icons.bolt, color: Colors.blue),
+                            title: Text(s.displayName,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w600)),
+                            subtitle: Text(s.description,
+                                style: const TextStyle(fontSize: 12)),
+                            onTap: () {
+                              Navigator.pop(context);
+                              _createForType(s);
+                            },
+                          ))
+                      .toList(),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -383,6 +403,14 @@ class _StrategyListScreenState extends State<StrategyListScreen>
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
           IconButton(
+            icon: const Icon(Icons.history),
+            tooltip: 'Backtest History',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                  builder: (_) => const BacktestHistoryScreen()),
+            ),
+          ),
+          IconButton(
             icon: const Icon(Icons.add),
             tooltip: 'New Strategy',
             onPressed: _createNew,
@@ -547,6 +575,7 @@ class _StrategyListScreenState extends State<StrategyListScreen>
                                 builder: (_) => BacktestConfigScreen(
                                   accessToken: widget.accessToken,
                                   clientId: widget.clientId,
+                                  config: config,
                                 ),
                               ),
                             );

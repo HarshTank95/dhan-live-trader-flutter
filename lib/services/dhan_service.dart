@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:candlesticks/candlesticks.dart';
+import 'candle_sanitizer.dart';
 import 'rate_limiter.dart';
 import 'scrip_service.dart';
 import '../models/holding_model.dart';
@@ -336,8 +337,10 @@ class DhanService {
         volume: i < volumes.length ? volumes[i] : 0,
       ));
     }
+    // Parse boundary — sanitize every API response (see CandleSanitizer).
+    final clean = CandleSanitizer.sanitize(candles, context: 'charts');
     // candlesticks package expects newest first
-    return candles.reversed.toList();
+    return clean.reversed.toList();
   }
 
   // ── Funds / margin balance ───────────────────────────────────────────

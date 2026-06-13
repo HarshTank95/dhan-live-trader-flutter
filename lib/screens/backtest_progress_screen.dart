@@ -4,6 +4,7 @@ import '../services/backtest_engine.dart';
 import '../services/scrip_service.dart';
 import '../services/storage_service.dart';
 import '../strategies/dominance_breakout_strategy.dart';
+import '../strategies/strategy_registry.dart';
 import 'backtest_results_screen.dart';
 
 class BacktestProgressScreen extends StatefulWidget {
@@ -15,6 +16,10 @@ class BacktestProgressScreen extends StatefulWidget {
   final List<int> securityIds;
   final Map<String, dynamic> params;
 
+  /// Which strategy to backtest (registry key). Defaults to dominance for
+  /// backward compatibility with older navigation paths.
+  final String strategyType;
+
   const BacktestProgressScreen({
     super.key,
     required this.accessToken,
@@ -24,6 +29,7 @@ class BacktestProgressScreen extends StatefulWidget {
     required this.stockUniverseLabel,
     required this.securityIds,
     required this.params,
+    this.strategyType = 'dominance_breakout',
   });
 
   @override
@@ -47,7 +53,8 @@ class _BacktestProgressScreenState extends State<BacktestProgressScreen> {
   }
 
   Future<void> _startBacktest() async {
-    final strategy = DominanceBreakoutStrategy();
+    final strategy = StrategyRegistry.create(widget.strategyType) ??
+        DominanceBreakoutStrategy();
     final scripService = ScripService();
 
     _engine = BacktestEngine(
@@ -125,22 +132,28 @@ class _BacktestProgressScreenState extends State<BacktestProgressScreen> {
         title: const Text('Running Backtest'),
         automaticallyImplyLeading: false,
       ),
-      body: Padding(
+      body: SafeArea(
+        child: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Phase indicator
-            Row(
-              children: [
-                _phaseChip('Download', _phase == 'download',
-                    _phase == 'simulate' || _phase == 'prepare'),
-                const Icon(Icons.arrow_right, color: Colors.grey),
-                _phaseChip('Prepare', _phase == 'prepare',
-                    _phase == 'simulate'),
-                const Icon(Icons.arrow_right, color: Colors.grey),
-                _phaseChip('Simulate', _phase == 'simulate', _done),
-              ],
+            // Phase indicator — FittedBox scales the row down on narrow
+            // screens so the three chips always fit without overflowing.
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Row(
+                children: [
+                  _phaseChip('Download', _phase == 'download',
+                      _phase == 'simulate' || _phase == 'prepare'),
+                  const Icon(Icons.arrow_right, color: Colors.grey),
+                  _phaseChip('Prepare', _phase == 'prepare',
+                      _phase == 'simulate'),
+                  const Icon(Icons.arrow_right, color: Colors.grey),
+                  _phaseChip('Simulate', _phase == 'simulate', _done),
+                ],
+              ),
             ),
 
             const SizedBox(height: 32),
@@ -163,14 +176,19 @@ class _BacktestProgressScreenState extends State<BacktestProgressScreen> {
             ),
             const SizedBox(height: 8),
 
-            // Progress text
+            // Progress text — status can be long (date · trades · P&L · chunk),
+            // so let it take the remaining width and ellipsize.
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  _statusMessage,
-                  style: const TextStyle(color: Colors.grey),
+                Expanded(
+                  child: Text(
+                    _statusMessage,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.grey),
+                  ),
                 ),
+                const SizedBox(width: 8),
                 Text(
                   '${(progress * 100).toStringAsFixed(0)}%',
                   style: const TextStyle(fontWeight: FontWeight.bold),
@@ -246,6 +264,7 @@ class _BacktestProgressScreenState extends State<BacktestProgressScreen> {
                 ),
               ),
           ],
+        ),
         ),
       ),
     );

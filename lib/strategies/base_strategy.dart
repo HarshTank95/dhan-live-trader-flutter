@@ -1,9 +1,11 @@
 import 'package:candlesticks/candlesticks.dart';
+import '../models/backtest_result_model.dart';
 import '../models/candle_stats_model.dart';
 import '../models/strategy_signal_model.dart';
 import '../models/strategy_trade_model.dart';
 import '../services/dhan_feed_service.dart';
 import '../services/scrip_service.dart';
+import 'strategy_engine_context.dart';
 
 /// Parameter type for auto-generating config UI.
 enum ParamType { integer, decimal, boolean, time }
@@ -189,4 +191,29 @@ abstract class BaseStrategy {
   /// an actionable cause without grepping per-stock REJECT lines.
   /// Default implementation returns null — strategies override to ship hints.
   String? diagnosisHint(String rule) => null;
+
+  // ── Self-contained engine hooks (optional) ──────────────────────────────
+  //
+  // Strategies whose backtest/live shape does NOT fit the dominance
+  // scan→breakout pipeline set [hasCustomEngine] = true and implement the
+  // three hooks below. The engines then delegate to the strategy and stay
+  // strategy-agnostic — a new self-contained strategy needs ZERO engine edits
+  // (just a class + a StrategyRegistry line). Dominance leaves these at their
+  // defaults and runs the engines' built-in path, untouched.
+
+  /// When true, the engines call [prepareBacktest]/[backtestDay] and [runLive]
+  /// instead of their built-in dominance pipeline.
+  bool get hasCustomEngine => false;
+
+  /// One-time backtest setup (e.g. fetch daily candles). Called once before the
+  /// per-day loop. Default: no-op.
+  Future<void> prepareBacktest(BacktestPrepContext ctx) async {}
+
+  /// Screen + simulate a single trading day. Return the day's result (or null
+  /// to skip). Default: null.
+  BacktestDayResult? backtestDay(BacktestDayContext ctx) => null;
+
+  /// Run the full live/paper session (pre-market through square-off) using the
+  /// engine services in [ctx]. Default: no-op.
+  Future<void> runLive(LiveEngineContext ctx) async {}
 }
