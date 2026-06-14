@@ -1418,11 +1418,18 @@ class HammerDominanceStrategy extends BaseStrategy {
   Future<void> runLive(LiveEngineContext ctx) async {
     final prep = await _livePreMarket(ctx);
     if (ctx.stopRequested) return;
-    final liveTrades = await _liveSession(ctx, prep);
-    if (ctx.stopRequested) return;
-    if (liveTrades.any((t) => t.status == TradeStatus.open)) {
-      await _liveMonitorExits(ctx, liveTrades);
-    }
+    // Entries and exits run CONCURRENTLY over a shared trade list. The exit
+    // monitor manages each position from the moment it is appended — so a trade
+    // entered at 09:40 is stop/trail-protected from 09:40, exactly like the
+    // backtest. (Previously the session ran to completion FIRST and exits only
+    // began after the 12:00 entry window, leaving morning trades unmanaged for
+    // hours and diverging from the backtest.) The monitor runs until the 15:00
+    // hard exit regardless of when the entry window closes.
+    final liveTrades = <StrategyTradeModel>[];
+    await Future.wait([
+      _liveSession(ctx, prep, liveTrades),
+      _liveMonitorExits(ctx, liveTrades),
+    ]);
   }
 
   /// Pre-market: daily candles → per-stock day levels; prior-day intraday →
@@ -1519,16 +1526,19 @@ class HammerDominanceStrategy extends BaseStrategy {
   /// Session: at each 5-min slot, scan closed bars for new triggers; for a
   /// pending trigger, watch the k+1 bar — poll LTP and fill the buy-stop at
   /// max(trigger.high, k+1 open-if-gapped); abandon if k+1 closes below.
-  Future<List<StrategyTradeModel>> _liveSession(
+  Future<void> _liveSession(
       LiveEngineContext ctx,
       ({Map<int, List<SupportLevel>> levels, Map<int, double> prevAvgRange, Map<int, double> prevClose, Map<int, String> symbols, Map<int, double> avgDailyVol})
-          prep) async {
+          prep,
+      List<StrategyTradeModel> liveTrades) async {
     final p = HammerParams(ctx.params);
     final today = DateTime.now();
     // Slots: first closed bar lands at windowStart+5min; keep polling until
     // the bar AFTER the last possible trigger (windowEnd) has closed.
+    // `liveTrades` is shared with the concurrent exit monitor — every entry we
+    // append is protected from the moment it fills (matches the backtest, which
+    // applies stop/trail/time from the entry bar onward).
     final windowEndMin = p.windowEndHour * 60 + p.windowEndMin;
-    final liveTrades = <StrategyTradeModel>[];
     final doneStocks = <int>{}; // one attempt per stock-day (traded or failed)
     final todayCandles = <int, List<Candle>>{};
 
@@ -1540,7 +1550,7 @@ class HammerDominanceStrategy extends BaseStrategy {
         .add(const Duration(minutes: 10)); // trigger@12:00 → k+1 closes 12:10
 
     while (!slot.isAfter(lastSlot)) {
-      if (ctx.stopRequested) return liveTrades;
+      if (ctx.stopRequested) return;
       if (p.maxTradesPerDay > 0 && liveTrades.length >= p.maxTradesPerDay) break;
 
       final slotLabel =
@@ -1553,7 +1563,7 @@ class HammerDominanceStrategy extends BaseStrategy {
             {'status': 'running', 'message': 'Waiting for $slotLabel candle...'});
         final waitEnd = now.add(targetTime.difference(now));
         while (DateTime.now().isBefore(waitEnd)) {
-          if (ctx.stopRequested) return liveTrades;
+          if (ctx.stopRequested) return;
           await Future.delayed(const Duration(seconds: 2));
         }
       }
@@ -1564,7 +1574,7 @@ class HammerDominanceStrategy extends BaseStrategy {
           .where((id) => !doneStocks.contains(id))
           .toList();
       for (final secId in inPlay) {
-        if (ctx.stopRequested) return liveTrades;
+        if (ctx.stopRequested) return;
         try {
           final candles = await ctx.fetchIntraday(secId, '5', date: today);
           if (candles.isEmpty) continue;
@@ -1728,8 +1738,7 @@ class HammerDominanceStrategy extends BaseStrategy {
       slot = slot.add(const Duration(minutes: 5));
     }
 
-    ctx.log('Hammer session complete. Trades: ${liveTrades.length}');
-    return liveTrades;
+    ctx.log('Hammer session complete (entry window closed). Trades: ${liveTrades.length}');
   }
 
   /// Catch-up path: trigger AND its k+1 bar are both already closed. Resolve
@@ -1819,17 +1828,12 @@ class HammerDominanceStrategy extends BaseStrategy {
     final hardExit = DateTime(
         now.year, now.month, now.day, p.hardExitHour, p.hardExitMin);
 
-    // Per-trade trailing state.
+    // Per-trade trailing state, lazily initialised as entries appear — the
+    // session appends to the shared `trades` list concurrently, so positions
+    // are picked up the moment they fill.
     final state = <String, ({double effectiveStop, double highWater, double risk})>{};
-    for (final t in trades) {
-      state[t.id] = (
-        effectiveStop: t.stopLoss,
-        highWater: t.entryPrice,
-        risk: t.entryPrice - t.stopLoss,
-      );
-    }
 
-    ctx.log('Monitoring ${trades.where((t) => t.status == TradeStatus.open).length} hammer position(s) until ${p.hardExitHour.toString().padLeft(2, "0")}:${p.hardExitMin.toString().padLeft(2, "0")}...');
+    ctx.log('Hammer exit monitor armed until ${p.hardExitHour.toString().padLeft(2, "0")}:${p.hardExitMin.toString().padLeft(2, "0")} (manages each position from entry)...');
 
     void close(StrategyTradeModel t, double px, TradeOutcome outcome, String tag) {
       t.status = TradeStatus.closed;
@@ -1876,14 +1880,25 @@ class HammerDominanceStrategy extends BaseStrategy {
 
     while (!ctx.stopRequested && DateTime.now().isBefore(hardExit)) {
       final open = trades.where((t) => t.status == TradeStatus.open).toList();
-      if (open.isEmpty) break;
+      if (open.isEmpty) {
+        // No open position yet (or all closed) — keep waiting; the session can
+        // still append new entries until the 12:00 window closes.
+        await Future.delayed(const Duration(seconds: 3));
+        continue;
+      }
       try {
         final ltpMap =
             await ctx.fetchLtpBatch(open.map((t) => t.securityId).toList());
         for (final t in open) {
           final ltp = ltpMap[t.securityId];
           if (ltp == null || ltp <= 0) continue;
-          final s = state[t.id]!;
+          final s = state.putIfAbsent(
+              t.id,
+              () => (
+                    effectiveStop: t.stopLoss,
+                    highWater: t.entryPrice,
+                    risk: t.entryPrice - t.stopLoss,
+                  ));
 
           // 1. Stop (initial or trailed).
           if (ltp <= s.effectiveStop) {
