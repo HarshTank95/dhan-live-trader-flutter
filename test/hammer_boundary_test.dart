@@ -64,6 +64,49 @@ void main() {
     });
   });
 
+  group('liquidity filter (avgVol cap + Camarilla-L3 bypass)', () {
+    HammerParams withCap(double cap) =>
+        HammerParams({...params, 'maxAvgDailyVol': cap});
+
+    test('cap of 0 disables the filter (any volume passes)', () {
+      expect(
+          HammerDominanceStrategy.passesLiquidity(
+              5000000, 'RN 100.00', withCap(0)),
+          isTrue);
+    });
+
+    test('below the cap passes', () {
+      expect(
+          HammerDominanceStrategy.passesLiquidity(
+              120000, 'RN 100.00', withCap(250000)),
+          isTrue);
+    });
+
+    test('at/above the cap is rejected without a CAM_L3 level', () {
+      expect(
+          HammerDominanceStrategy.passesLiquidity(
+              250000, 'RN 100.00 + CPR 99-101 (conf 2)', withCap(250000)),
+          isFalse);
+      expect(
+          HammerDominanceStrategy.passesLiquidity(
+              900000, 'PDC 232.93', withCap(250000)),
+          isFalse);
+    });
+
+    test('Camarilla-L3 level bypasses the cap at any volume', () {
+      expect(
+          HammerDominanceStrategy.passesLiquidity(
+              5000000, 'TL 1262.97 + CAM_L3 1263.74 (conf 2)', withCap(250000)),
+          isTrue);
+    });
+
+    test('null support note above the cap is rejected (no bypass)', () {
+      expect(
+          HammerDominanceStrategy.passesLiquidity(300000, null, withCap(250000)),
+          isFalse);
+    });
+  });
+
   group('scanForTrigger stop-distance boundary (ASHOKLEY regression)', () {
     test('stop distance exactly at the minimum is accepted', () {
       final d = DateTime(2026, 5, 14);

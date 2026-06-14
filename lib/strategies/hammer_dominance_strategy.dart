@@ -191,6 +191,13 @@ class HammerDominanceStrategy extends BaseStrategy {
         'riskPerTrade': 500.0,
         'maxTradesPerDay': 20,
         'maxCapitalPerTrade': 300000.0,
+        // Liquidity filter (mined, cross-year robust): the breakout edge lives
+        // in lower-liquidity names; ultra-liquid mega-caps (avg vol 400k+) made
+        // big money in 2025-26 but lost −₹33k in the 2024-25 held-out year. Skip
+        // names whose 20-day avg volume ≥ this cap — UNLESS the matched level is
+        // a Camarilla L3 (the one level type robust at any liquidity). 0 = off.
+        // 250k OR CAM_L3 → +₹24k/+₹22k both years (vs +₹47k/−₹23k unfiltered).
+        'maxAvgDailyVol': 250000.0,
         'costModelRoundTripPct': 0.10,
       };
 
@@ -518,6 +525,17 @@ class HammerDominanceStrategy extends BaseStrategy {
             min: 0.0,
             max: 10000000.0,
             unit: 'INR',
+            group: 'Position Sizing'),
+        const StrategyParamDef(
+            key: 'maxAvgDailyVol',
+            label: 'Max Avg Daily Volume',
+            description:
+                'Skip names whose 20-day avg volume ≥ this (Camarilla-L3 levels bypass the cap). 0 = off. Lower-liquidity names hold their edge out-of-sample; mega-caps do not.',
+            type: ParamType.decimal,
+            defaultValue: 250000.0,
+            min: 0.0,
+            max: 100000000.0,
+            unit: 'shares',
             group: 'Position Sizing'),
         const StrategyParamDef(
             key: 'costModelRoundTripPct',
@@ -1245,12 +1263,43 @@ class HammerDominanceStrategy extends BaseStrategy {
         continue;
       }
 
+      // Liquidity filter (mined, cross-year robust). avgVol uses only prior
+      // days → look-ahead-safe and identical to live. Camarilla-L3 levels bypass.
+      if (!passesLiquidity(_avgDailyVolume(dailyBefore, 20), scan.supportNote, p)) {
+        dayRejects['liquidity'] = (dayRejects['liquidity'] ?? 0) + 1;
+        ctx.runLogInfo('Reject',
+            '[${ctx.dateStr}] $symbol liquidity: avgVol ${_avgDailyVolume(dailyBefore, 20).toStringAsFixed(0)} ≥ ${p.maxAvgDailyVol.toStringAsFixed(0)} (no CAM_L3 bypass)',
+            {'date': ctx.dateStr, 'symbol': symbol, 'stage': 'liquidity'});
+        continue;
+      }
+
       triggers++;
       final k = scan.triggerIndex!;
       final trig = today[k];
       final trigTime =
           '${trig.date.hour.toString().padLeft(2, "0")}:${trig.date.minute.toString().padLeft(2, "0")}';
       ctx.log('TRIGGER [${ctx.dateStr} $trigTime]: $symbol high=${trig.high} low=${trig.low} @ ${scan.supportNote}');
+      // Structured trigger record — mirrors the live `Trigger` payload so the
+      // two runs reconcile on (date, symbol, triggerTime, triggerIndex) even
+      // for triggers that never fill. This is the "same stock, same candle" check.
+      ctx.runLogInfo(
+        'Trigger',
+        'TRIGGER ${ctx.dateStr} $trigTime $symbol @ ${scan.supportNote}',
+        {
+          'date': ctx.dateStr,
+          'symbol': symbol,
+          'securityId': secId,
+          'triggerTime': trigTime,
+          'triggerIndex': k,
+          'triggerHigh': trig.high,
+          'triggerLow': trig.low,
+          'levels': scan.supportNote,
+          'confluence': scan.confluence,
+          'pattern': scan.patternType,
+          'avgDailyVol':
+              double.parse(_avgDailyVolume(dailyBefore, 20).toStringAsFixed(0)),
+        },
+      );
 
       final exec = executeFromBars(
         securityId: secId,
@@ -1378,7 +1427,7 @@ class HammerDominanceStrategy extends BaseStrategy {
 
   /// Pre-market: daily candles → per-stock day levels; prior-day intraday →
   /// prev-day average bar range (the 4× spike filter baseline).
-  Future<({Map<int, List<SupportLevel>> levels, Map<int, double> prevAvgRange, Map<int, double> prevClose, Map<int, String> symbols})>
+  Future<({Map<int, List<SupportLevel>> levels, Map<int, double> prevAvgRange, Map<int, double> prevClose, Map<int, String> symbols, Map<int, double> avgDailyVol})>
       _livePreMarket(LiveEngineContext ctx) async {
     final p = HammerParams(ctx.params);
     final today = DateTime.now();
@@ -1406,7 +1455,7 @@ class HammerDominanceStrategy extends BaseStrategy {
       isCancelled: () => ctx.stopRequested,
     );
     if (ctx.stopRequested) {
-      return (levels: <int, List<SupportLevel>>{}, prevAvgRange: <int, double>{}, prevClose: <int, double>{}, symbols: <int, String>{});
+      return (levels: <int, List<SupportLevel>>{}, prevAvgRange: <int, double>{}, prevClose: <int, double>{}, symbols: <int, String>{}, avgDailyVol: <int, double>{});
     }
     ctx.log('Daily candles loaded for ${dailyData.length} stocks');
 
@@ -1414,6 +1463,7 @@ class HammerDominanceStrategy extends BaseStrategy {
     final prevAvgRange = <int, double>{};
     final prevClose = <int, double>{};
     final symbols = <int, String>{};
+    final avgDailyVol = <int, double>{}; // 20-day avg vol (prior days) for the liquidity filter
 
     int done = 0;
     for (final secId in ctx.securityIds) {
@@ -1429,6 +1479,7 @@ class HammerDominanceStrategy extends BaseStrategy {
       symbols[secId] = scrip?.symbol ?? secId.toString();
       levels[secId] = computeDayLevels(dailyBefore, ctx.params);
       prevClose[secId] = dailyBefore.last.close; // for the gap pre-filter
+      avgDailyVol[secId] = _avgDailyVolume(dailyBefore, 20); // for the liquidity filter
 
       // Prior trading day's intraday avg bar range (walk back over weekends).
       double avgRange = 0;
@@ -1462,7 +1513,7 @@ class HammerDominanceStrategy extends BaseStrategy {
     ctx.recordActiveStocks(levels.length);
     ctx.log('Hammer pre-market complete: ${levels.length} stocks with levels');
     ctx.addKeyEvent('Hammer pre-market: ${levels.length} stocks ready');
-    return (levels: levels, prevAvgRange: prevAvgRange, prevClose: prevClose, symbols: symbols);
+    return (levels: levels, prevAvgRange: prevAvgRange, prevClose: prevClose, symbols: symbols, avgDailyVol: avgDailyVol);
   }
 
   /// Session: at each 5-min slot, scan closed bars for new triggers; for a
@@ -1470,7 +1521,7 @@ class HammerDominanceStrategy extends BaseStrategy {
   /// max(trigger.high, k+1 open-if-gapped); abandon if k+1 closes below.
   Future<List<StrategyTradeModel>> _liveSession(
       LiveEngineContext ctx,
-      ({Map<int, List<SupportLevel>> levels, Map<int, double> prevAvgRange, Map<int, double> prevClose, Map<int, String> symbols})
+      ({Map<int, List<SupportLevel>> levels, Map<int, double> prevAvgRange, Map<int, double> prevClose, Map<int, String> symbols, Map<int, double> avgDailyVol})
           prep) async {
     final p = HammerParams(ctx.params);
     final today = DateTime.now();
@@ -1550,9 +1601,39 @@ class HammerDominanceStrategy extends BaseStrategy {
           params: ctx.params,
         );
         if (!scan.passed) continue; // not rejected-for-the-day: more bars may come
+        // Liquidity filter — identical gate to backtest. avgVol was precomputed
+        // in pre-market from prior daily bars (no intraday data), so live and
+        // backtest decide this the same way. Camarilla-L3 levels bypass the cap.
+        if (!passesLiquidity(prep.avgDailyVol[secId] ?? 0, scan.supportNote, p)) {
+          doneStocks.add(secId);
+          ctx.log('SKIP (liquidity): ${prep.symbols[secId] ?? secId} avgVol ${(prep.avgDailyVol[secId] ?? 0).toStringAsFixed(0)} ≥ ${p.maxAvgDailyVol.toStringAsFixed(0)}');
+          continue;
+        }
         final k = scan.triggerIndex!;
         final symbol = prep.symbols[secId] ?? secId.toString();
         final trig = bars[k];
+
+        // Structured trigger record — same shape/keys as the backtest `Trigger`
+        // record, so the day's two logs reconcile on (date, symbol, triggerTime,
+        // triggerIndex). Emitted for every passing trigger, filled or not.
+        ctx.runLogInfo(
+          'Trigger',
+          'TRIGGER ${_fmt(today)} ${_hm(trig.date)} $symbol @ ${scan.supportNote}',
+          {
+            'date': _fmt(today),
+            'symbol': symbol,
+            'securityId': secId,
+            'triggerTime': _hm(trig.date),
+            'triggerIndex': k,
+            'triggerHigh': trig.high,
+            'triggerLow': trig.low,
+            'levels': scan.supportNote,
+            'confluence': scan.confluence,
+            'pattern': scan.patternType,
+            'avgDailyVol':
+                double.parse((prep.avgDailyVol[secId] ?? 0).toStringAsFixed(0)),
+          },
+        );
 
         if (k + 1 < bars.length) {
           // k+1 already closed → resolve with bar semantics (identical to
@@ -1613,6 +1694,10 @@ class HammerDominanceStrategy extends BaseStrategy {
                 if (trade != null) {
                   liveTrades.add(trade);
                   ctx.recordTrade(trade);
+                  _logLiveEntry(ctx, trade, pend.trigger, pend.note,
+                      seenBelow.contains(pend.secId)
+                          ? 'buystop-cross'
+                          : 'buystop-gap');
                   ctx.log('TRADE: ${trade.symbol} Qty=${trade.quantity} Entry=${trade.entryPrice} SL=${trade.stopLoss}${trade.target > 0 ? " Target=${trade.target}" : " (trail)"} | ${pend.note}');
                   ctx.addKeyEvent('TRADE: ${trade.symbol} Qty=${trade.quantity} @ ${trade.entryPrice}');
                   ctx.sendUpdate('trade_update', {
@@ -1675,6 +1760,7 @@ class HammerDominanceStrategy extends BaseStrategy {
     final trade = _buildLiveTrade(ctx, p, secId, symbol, trigger, fill);
     if (trade != null) {
       ctx.recordTrade(trade);
+      _logLiveEntry(ctx, trade, trigger, note, 'catchup-bar');
       ctx.log('TRADE (catch-up): $symbol Qty=${trade.quantity} Entry=${trade.entryPrice} SL=${trade.stopLoss}');
       ctx.sendUpdate('trade_update', {
         'type': 'entry',
@@ -1752,6 +1838,25 @@ class HammerDominanceStrategy extends BaseStrategy {
       t.outcome = outcome;
       ctx.log('$tag: ${t.symbol} @ ${px.toStringAsFixed(2)} P&L=₹${t.pnl.toStringAsFixed(0)}');
       ctx.addKeyEvent('$tag: ${t.symbol} @ ${px.toStringAsFixed(2)} P&L=₹${t.pnl.toStringAsFixed(0)}');
+      // Structured exit record — exitKind vocabulary matches the backtest
+      // (stop/trail/target/time) so the two runs compare exit-for-exit.
+      final exitT = t.exitTime ?? DateTime.now();
+      ctx.runLogInfo(
+        'LiveExit',
+        'EXIT ${t.symbol} ${_exitKindFromTag(tag)} @ ${px.toStringAsFixed(2)} P&L=₹${t.pnl.toStringAsFixed(0)}',
+        {
+          'date': _fmt(t.entryTime ?? exitT),
+          'symbol': t.symbol,
+          'securityId': t.securityId,
+          'entryTime': _hm(t.entryTime ?? exitT),
+          'exitTime': _hm(exitT),
+          'exitKind': _exitKindFromTag(tag),
+          'entryPrice': t.entryPrice,
+          'exitPrice': px,
+          'qty': t.quantity,
+          'pnl': double.parse(t.pnl.toStringAsFixed(2)),
+        },
+      );
       ctx.sendUpdate('trade_update', {
         'type': outcome == TradeOutcome.stopLoss
             ? 'sl_hit'
@@ -1829,6 +1934,49 @@ class HammerDominanceStrategy extends BaseStrategy {
   String _fmt(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
+  /// HH:MM — the candle identifier used for live↔backtest reconciliation.
+  static String _hm(DateTime d) =>
+      '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+
+  /// Maps the exit-monitor's human tag to the backtest's `exitKind` vocabulary
+  /// (stop/trail/target/time) so live and backtest exit records compare directly.
+  static String _exitKindFromTag(String tag) => tag == 'TRAIL STOP'
+      ? 'trail'
+      : tag == 'SL HIT'
+          ? 'stop'
+          : tag == 'TARGET HIT'
+              ? 'target'
+              : 'time';
+
+  /// One structured live-entry record, keyed/shaped to line up with the
+  /// backtest `Trade` payload (join on date+symbol; compare triggerTime ↔
+  /// triggerTime and entryCandle ↔ entryTime). [fillMode] records HOW live
+  /// filled (catch-up bar vs buy-stop cross vs gap) — the documented sources of
+  /// the small entry-price differences vs backtest's bar-semantics fill.
+  void _logLiveEntry(LiveEngineContext ctx, StrategyTradeModel t, Candle trigger,
+      String note, String fillMode) {
+    final risk = t.entryPrice - t.stopLoss;
+    final entryT = t.entryTime ?? DateTime.now();
+    ctx.runLogInfo(
+      'LiveEntry',
+      'ENTRY ${t.symbol} @ ${t.entryPrice.toStringAsFixed(2)} ($fillMode)',
+      {
+        'date': _fmt(entryT),
+        'symbol': t.symbol,
+        'securityId': t.securityId,
+        'triggerTime': _hm(trigger.date),
+        'entryCandle': _hm(trigger.date.add(const Duration(minutes: 5))),
+        'entryWallClock': _hm(entryT),
+        'entryPrice': t.entryPrice,
+        'qty': t.quantity,
+        'stopLoss': t.stopLoss,
+        'stopPct': double.parse((risk / t.entryPrice * 100).toStringAsFixed(4)),
+        'levels': note,
+        'fillMode': fillMode,
+      },
+    );
+  }
+
   // ── Mining feature helpers (computable at entry — no look-ahead) ─────────
 
   /// Trigger volume ÷ average of the [n] bars before it (volume surge).
@@ -1855,6 +2003,17 @@ class HammerDominanceStrategy extends BaseStrategy {
   }
 
   /// Average daily share volume over the most recent [days] daily candles.
+  /// Liquidity gate: trade only if the 20-day avg volume is below the cap, OR
+  /// the matched level is a Camarilla L3 (the one level type robust at any
+  /// liquidity). A cap of 0 disables the filter. [avgVol] is built from prior
+  /// days only, so this is look-ahead-safe and computes identically in backtest
+  /// and live — which is why the two agree.
+  static bool passesLiquidity(double avgVol, String? supportNote, HammerParams p) {
+    if (p.maxAvgDailyVol <= 0) return true;
+    if (avgVol < p.maxAvgDailyVol) return true;
+    return (supportNote ?? '').contains('CAM_L3'); // Camarilla-L3 bypass
+  }
+
   static double _avgDailyVolume(List<Candle> daily, int days) {
     if (daily.isEmpty) return 0;
     final s = daily.length - days < 0 ? 0 : daily.length - days;
@@ -1990,5 +2149,8 @@ class HammerParams {
   double get riskPerTrade => _d('riskPerTrade', 500.0);
   int get maxTradesPerDay => _i('maxTradesPerDay', 20);
   double get maxCapitalPerTrade => _d('maxCapitalPerTrade', 300000.0);
+  // 0 = off (fallback keeps old behaviour for saved configs missing the key;
+  // re-added configs pick up 250000 from defaultParams).
+  double get maxAvgDailyVol => _d('maxAvgDailyVol', 0.0);
   double get costModelRoundTripPct => _d('costModelRoundTripPct', 0.10);
 }

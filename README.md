@@ -220,6 +220,35 @@ Default: Risk INR 500, Target INR 2000 per trade, max 2 trades/day.
 
 ---
 
+## Hammer/Dominance S1 Strategy (with Liquidity Edge)
+
+A second, self-contained strategy (`hammer_dominance_s1`) ported from the C# "Hammer/Dominance (Long) — S1" preset, then tuned in-app with offline mining. It plugs into the same engines via the **self-contained-engine** path (`BaseStrategy.hasCustomEngine == true`): the strategy owns its full screening / entry / exit / logging, and the live + backtest engines stay strategy-agnostic. Adding a strategy of this shape = one new class + one registry line, zero engine edits.
+
+### How It Works
+
+*The level is the edge; the candle is the trigger; the break is the proof.* A hammer or green-dominance candle probes an Indian intraday **support level** — CPR/vCPR, floor pivots, PDL/PDC, **Camarilla L3**, round numbers, 60-day reactive-swing zones, and rising daily **trendlines** (price × time, projected to today) — closes back above it, and the *next* candle must break the trigger's high (buy-stop fill). Window 09:30–12:00 IST; run-the-winner trailing exit (trail arms at +2.5R, sits 0.75R below the high-water mark) with a 15:00 square-off.
+
+### The Out-of-Sample Story (why the Liquidity Filter exists)
+
+The in-app tuning looked great on the year it was tuned on (2025→26: **+₹47k**), but on a true held-out year (2024→25) the same config **lost −₹22.8k** — classic overfitting. Mining both years with a path-aware offline simulator (`node:sqlite` replay over a pulled `candle_cache.db` + the run JSONLs) killed two rescue ideas (break-even stop, market-regime gate — both fail out-of-sample) and surfaced **one robust lever**:
+
+- **Liquidity filter** (`maxAvgDailyVol`, default **250000**): the breakout edge is **monotonic in liquidity** — it survives in lower-liquidity Nifty-500 names and is destroyed in ultra-liquid mega-caps (avg vol 400k+ made +₹23.8k in 2025→26 but **−₹32.7k** in 2024→25). The filter skips names whose **20-day average volume** (prior days only → look-ahead-safe, computed in pre-market) is ≥ the cap, **unless** the matched level is a **Camarilla L3** (the one level type profitable in *both* years — every other level type collapses out-of-sample).
+
+**Result, both years now profitable** (validated on-device): 2024→25 **+₹21.5k** (was −₹22.8k), 2025→26 **+₹24.2k**, ~140–180 trades/year, ₹118–168 profit/trade, ~50% win. The on-device run matched the offline projection to within ₹400 over two years.
+
+> Still only **two-year validated**. Before real capital: confirm on a third held-out year (2023) + paper-trade with the reconciliation diff below.
+
+### Live ↔ Backtest Reconciliation
+
+To prove the live engine fires on the **same stock + same candle** as the backtest, both paths emit matching structured run-log records:
+- `Trigger` (both engines) — date, symbol, `triggerTime`, `triggerIndex`, levels — for *every* passing trigger, filled or not.
+- `LiveEntry` (live) — triggerTime, `entryCandle`, entry price, qty, `fillMode` (catchup-bar / buystop-cross / buystop-gap).
+- `LiveExit` (live) — `exitKind` in the backtest's stop/trail/target/time vocabulary, exit price, P&L.
+
+After a live day, run a same-date backtest with the same config and diff the two run JSONLs with `compare_live_backtest.js`: it joins on (date, symbol, triggerTime), reports **missed/extra triggers and candle-index mismatches** (the real flags), and treats entry/exit **price** diffs as expected (live LTP fill vs backtest bar semantics).
+
+---
+
 ## Backtest Engine
 
 Run the same Dominance + Breakout strategy on historical data to validate before live trading.
@@ -413,8 +442,12 @@ lib/
 └── strategies/
     ├── base_strategy.dart                 # Abstract strategy interface + StrategyParamDef
     ├── strategy_registry.dart             # Factory registry for strategy types
-    └── dominance_breakout_strategy.dart   # Dominance candle + breakout strategy (exact C# port)
+    ├── strategy_engine_context.dart       # Façades for self-contained strategies (Prep/Day/Live contexts)
+    ├── dominance_breakout_strategy.dart   # Dominance candle + breakout strategy (exact C# port)
+    └── hammer_dominance_strategy.dart     # Hammer/Dominance S1 (support + confirmation) with liquidity filter
 ```
+
+> Also added in this line of work: `services/candle_sanitizer.dart` (single choke point for candle dedupe/validity/sort), daily-candle caching in `candle_repository.dart`, a **chunked** `backtest_engine.dart` for bounded-memory multi-year runs, and `screens/backtest_history_screen.dart` (browsable past-run list). Reconciliation tooling lives outside the app at `D:\Nearby\compare_live_backtest.js`.
 
 ---
 
@@ -734,6 +767,16 @@ Screening window ends → auto-stop → show results
 - **`BaseStrategy.diagnosisHint(rule)`** — per-strategy hint vocabulary. Default returns null; `DominanceBreakoutStrategy` overrides with the 8 R1–R8 explanations. Future strategies (mean-reversion, gap-fade) ship their own hint maps without touching the engine
 - **`ScanReport` callback on `strategy.scan()`** — strategies now emit structured `{stocksEvaluated, candlesInWindow, rejectCounts}` alongside the signal list. Both engines aggregate the rejects across slots so the WHY ZERO line can identify the top blocker without parsing log strings
 - **Two-tab Log Viewer + per-run detail screen** — `LogViewerScreen` rebuilt with App (existing flat `app_log.txt`) and Runs (per-run JSONL list with kind/Paper/Live/Backtest chips) tabs. `RunLogDetailScreen` shows one run's events with dynamic tag chips (auto-derived from loaded events, frequency-sorted), Info/Warn/Error level filters, search, and share-as-JSONL. Each history card gets a "View full logs" button that deep-links into the corresponding run
+
+### Phase 5.5 (Complete) — Second Strategy + Research Harness
+- **Hammer/Dominance S1 strategy** (`hammer_dominance_s1`) via the self-contained-engine path — own screening/entry/exit/logging, zero engine edits
+- **Generic strategy engine** — `BaseStrategy.hasCustomEngine` + `prepareBacktest()`/`backtestDay()`/`runLive()` context façades so future strategies plug in without touching the engines
+- **CandleSanitizer** single choke point (dedupe-by-timestamp + OHLC validity + sort) — fixed real Dhan duplicate-bar bugs corrupting next-bar entry/exit
+- **Chunked backtest engine** — ~28-day sliding windows for bounded-memory multi-year runs (identical results to a whole-range load)
+- **Per-trade mining payload** + offline path-aware simulator (`node:sqlite` over `candle_cache.db`) — replays exit/filter variants, reproduces the live engine within ₹2/trade
+- **Out-of-sample validation discipline** — held-out-year testing exposed overfitting; the **liquidity filter** (`maxAvgDailyVol` + Camarilla-L3 bypass) is the one cross-year-robust lever; break-even-stop and regime-gate ideas were tested and rejected
+- **Live↔backtest reconciliation logging** (`Trigger`/`LiveEntry`/`LiveExit`) + diff tool for same-stock/same-candle verification
+- **Backtest history screen** — browsable list of past runs (persisted, swipe-to-delete)
 
 ### Phase 6 (Next)
 - Live trading via Dhan Order API
