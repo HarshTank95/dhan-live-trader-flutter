@@ -8,6 +8,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/strategy_config_model.dart';
+import '../strategies/strategy_registry.dart';
 import 'app_logger.dart';
 import 'strategy_engine.dart';
 
@@ -643,6 +644,15 @@ Future<void> onStart(ServiceInstance service) async {
   } catch (e) {
     debugPrint('[BgIsolate] DartPluginRegistrant FAILED: $e');
   }
+
+  // The background isolate has its OWN memory — the StrategyRegistry populated
+  // by main() is NOT shared here. Without this, StrategyRegistry.create() for a
+  // self-contained strategy (e.g. hammer_dominance_s1) returns null and the
+  // engine silently falls back to the hardcoded Dominance inline path — i.e. a
+  // Hammer config would run Dominance live. Re-init the registry per isolate
+  // (idempotent), exactly like AppLogger.init() must run in each isolate.
+  StrategyRegistry.init();
+  debugPrint('[BgIsolate] StrategyRegistry initialized');
 
   // ── STEP 2: Android foreground/background listeners ──
   debugPrint('[BgIsolate] Service type: ${service.runtimeType}');

@@ -142,7 +142,19 @@ class StrategyEngine {
       // â€” pre-market, screening, entry and exit â€” through the engine faÃ§ade.
       // Dominance (and any scanâ†’breakout strategy) uses the built-in path.
       final customStrategy = StrategyRegistry.create(config.strategyType);
-      if (customStrategy != null && customStrategy.hasCustomEngine) {
+      if (customStrategy == null) {
+        // Registry miss — almost always a per-isolate init bug (the background
+        // isolate has its own memory; StrategyRegistry.init() must run here too).
+        // Do NOT silently fall through to the hardcoded Dominance inline path:
+        // that once ran Dominance live for a Hammer config and masked the bug.
+        // Fail loudly instead so the wrong strategy can never run silently.
+        _log('Engine',
+            'FATAL: strategy type "${config.strategyType}" is not registered in this isolate — aborting (did StrategyRegistry.init() run on start?)');
+        _addKeyEvent('ERROR: strategy "${config.strategyType}" not registered — not running');
+        endStatus = 'error';
+        return;
+      }
+      if (customStrategy.hasCustomEngine) {
         _sendUpdate('phase',
             {'phase': 'preparing', 'message': 'Preparing strategy...'});
         await customStrategy.runLive(_LiveEngineCtx(this));
