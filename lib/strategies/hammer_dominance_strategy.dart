@@ -1601,6 +1601,8 @@ class HammerDominanceStrategy extends BaseStrategy {
           final gapPct = (bars.first.open - pc) / pc * 100;
           if (gapRejected(gapPct, p)) {
             doneStocks.add(secId);
+            _liveReject(ctx, today, secId, prep.symbols[secId] ?? '$secId',
+                'gap_band', 'gap ${gapPct.toStringAsFixed(2)}% in reject band');
             continue;
           }
         }
@@ -1616,7 +1618,9 @@ class HammerDominanceStrategy extends BaseStrategy {
         // backtest decide this the same way. Camarilla-L3 levels bypass the cap.
         if (!passesLiquidity(prep.avgDailyVol[secId] ?? 0, scan.supportNote, p)) {
           doneStocks.add(secId);
-          ctx.log('SKIP (liquidity): ${prep.symbols[secId] ?? secId} avgVol ${(prep.avgDailyVol[secId] ?? 0).toStringAsFixed(0)} ≥ ${p.maxAvgDailyVol.toStringAsFixed(0)}');
+          _liveReject(ctx, today, secId, prep.symbols[secId] ?? '$secId',
+              'liquidity',
+              'avgVol ${(prep.avgDailyVol[secId] ?? 0).toStringAsFixed(0)} ≥ ${p.maxAvgDailyVol.toStringAsFixed(0)} (no CAM_L3 bypass)');
           continue;
         }
         final k = scan.triggerIndex!;
@@ -1652,7 +1656,12 @@ class HammerDominanceStrategy extends BaseStrategy {
           doneStocks.add(secId);
           final trade = _liveEnterFromClosedBar(
               ctx, p, secId, symbol, bars, k, scan.supportNote ?? '');
-          if (trade != null) liveTrades.add(trade);
+          if (trade != null) {
+            liveTrades.add(trade);
+          } else {
+            _liveReject(ctx, today, secId, symbol, 'no_confirmation',
+                'next bar never broke trigger high ${trig.high}');
+          }
         } else {
           // k+1 is the currently forming bar → arm a buy-stop at the high.
           doneStocks.add(secId);
@@ -1732,13 +1741,46 @@ class HammerDominanceStrategy extends BaseStrategy {
         for (final pend in stillPending) {
           final symbol = prep.symbols[pend.secId] ?? '${pend.secId}';
           ctx.log('NO FILL: $symbol — next bar never broke trigger high ${pend.trigger.high}');
+          _liveReject(ctx, today, pend.secId, symbol, 'no_confirmation',
+              'buy-stop unfilled — next bar never broke trigger high ${pend.trigger.high}');
         }
       }
 
       slot = slot.add(const Duration(minutes: 5));
     }
 
-    ctx.log('Hammer session complete (entry window closed). Trades: ${liveTrades.length}');
+    // End-of-session reject parity: every level-stock without a terminal
+    // outcome above (gap / liquidity / trigger) gets exactly one logged reason
+    // here — a final scan stage if it never triggered, or no_data. Mirrors the
+    // backtest's one-Reject-per-stock so a missed-trade diff shows precisely why
+    // live skipped any stock the backtest traded.
+    int sweptRejects = 0;
+    for (final secId in prep.levels.keys) {
+      if (doneStocks.contains(secId)) continue;
+      final symbol = prep.symbols[secId] ?? '$secId';
+      final bars = todayCandles[secId];
+      if (bars == null || bars.length < 2) {
+        _liveReject(ctx, today, secId, symbol, 'no_data',
+            'no intraday bars in the 09:30–12:00 window');
+        sweptRejects++;
+        continue;
+      }
+      final scan = scanForTrigger(
+        todayCandles: bars,
+        levels: prep.levels[secId]!,
+        prevDayAvgRange: prep.prevAvgRange[secId] ?? 0,
+        params: ctx.params,
+      );
+      _liveReject(
+          ctx,
+          today,
+          secId,
+          symbol,
+          scan.passed ? 'no_fill' : (scan.rejectStage ?? 'no_trigger'),
+          scan.rejectDetail ?? 'no qualifying hammer/dominance setup at support');
+      sweptRejects++;
+    }
+    ctx.log('Hammer session complete (entry window closed). Trades: ${liveTrades.length}, end-of-day rejects logged: $sweptRejects');
   }
 
   /// Catch-up path: trigger AND its k+1 bar are both already closed. Resolve
@@ -1962,6 +2004,22 @@ class HammerDominanceStrategy extends BaseStrategy {
           : tag == 'TARGET HIT'
               ? 'target'
               : 'time';
+
+  /// One structured live reject record — same `Reject` tag, stage vocabulary
+  /// and shape the backtest emits in `backtestDay`, so a missed-trade diff is
+  /// diagnosable: for any stock that traded in backtest but not live, the live
+  /// log now says exactly why (gap_band / liquidity / no_confirmation / a scan
+  /// stage / no_data). Mirrors the backtest's one-outcome-per-stock contract.
+  void _liveReject(LiveEngineContext ctx, DateTime day, int secId, String symbol,
+      String stage, String detail) {
+    ctx.runLogInfo('Reject', '[${_fmt(day)}] $symbol $stage: $detail', {
+      'date': _fmt(day),
+      'symbol': symbol,
+      'securityId': secId,
+      'stage': stage,
+      'detail': detail,
+    });
+  }
 
   /// One structured live-entry record, keyed/shaped to line up with the
   /// backtest `Trade` payload (join on date+symbol; compare triggerTime ↔
