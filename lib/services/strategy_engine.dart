@@ -1130,7 +1130,7 @@ class StrategyEngine {
           'Accept': 'application/json',
         },
         body: body,
-      );
+      ).timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {
         final json = jsonDecode(response.body);
@@ -1384,7 +1384,13 @@ class StrategyEngine {
           'Accept': 'application/json',
         },
         body: jsonEncode({'NSE_EQ': securityIds}),
-      );
+      ).timeout(const Duration(seconds: 15));
+      // Without this timeout a half-open/stuck TCP connection (e.g. a network
+      // glitch) makes `await http.post` hang FOREVER, which froze the exit
+      // monitor's poll loop — a position then never reached its 15:00 square-off
+      // (observed 2026-06-18: CCL entered but never exited, run hung till manual
+      // stop). On timeout this throws → caught below → returns {} → the monitor
+      // simply skips this poll and keeps going, still squaring off at 15:00.
 
       if (response.statusCode != 200) return {};
 
