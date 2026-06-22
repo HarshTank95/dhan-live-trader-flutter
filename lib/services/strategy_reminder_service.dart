@@ -73,7 +73,10 @@ class StrategyReminderService {
           ?.createNotificationChannel(channel);
 
       _initialized = true;
-      AppLogger.info('Reminder', 'StrategyReminderService initialized');
+      AppLogger.info(
+        'Reminder',
+        'StrategyReminderService initialized | tz=${tz.local.name} now=${_fmtTs(tz.TZDateTime.now(tz.local))}',
+      );
     } catch (e, s) {
       debugPrint('[Reminder] initialize failed: $e\n$s');
     }
@@ -101,14 +104,21 @@ class StrategyReminderService {
     });
     final base = _baseId(config.id);
 
+    AppLogger.info(
+      'Reminder',
+      'Scheduling "${config.name}" (cfg=${config.id}) baseId=$base '
+      'fire=${_fmtClock(reminderMinuteOfDay)} IST lead=${config.reminderMinutesBefore}m mode=$mode',
+    );
+
     // Schedule one notification per weekday (Mon..Fri = DateTime.monday..friday).
     for (int weekday = DateTime.monday; weekday <= DateTime.friday; weekday++) {
       final next = _nextOccurrence(weekday, hour, minute);
       final dayOffset = weekday - DateTime.monday;
+      final notifId = base + dayOffset;
 
       try {
         await _plugin.zonedSchedule(
-          base + dayOffset,
+          notifId,
           'Pre-market reminder: ${config.name}',
           body,
           next,
@@ -136,8 +146,15 @@ class StrategyReminderService {
           matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
           payload: payload,
         );
-      } catch (e) {
-        debugPrint('[Reminder] schedule failed for ${config.name} day=$weekday: $e');
+        AppLogger.info(
+          'Reminder',
+          '  slot ${_weekdayName(weekday)} id=$notifId → next fire ${_fmtTs(next)} ${next.timeZoneName}',
+        );
+      } catch (e, s) {
+        AppLogger.error(
+          'Reminder',
+          'zonedSchedule FAILED "${config.name}" ${_weekdayName(weekday)} id=$notifId: $e\n$s',
+        );
       }
     }
 
@@ -145,6 +162,7 @@ class StrategyReminderService {
       'Reminder',
       'Scheduled ${config.name} at ${_fmtClock(reminderMinuteOfDay)} IST (Mon–Fri, ${config.reminderMinutesBefore} min before market open)',
     );
+    await logPendingReminders('after-schedule:${config.name}');
   }
 
   /// Cancel all 5 weekday slots for a given strategy.
@@ -221,6 +239,11 @@ class StrategyReminderService {
       List<StrategyConfigModel> configs) async {
     if (!_initialized) return;
     try {
+      AppLogger.info(
+        'Reminder',
+        'syncAllReminders: ${configs.length} config(s) — '
+        '${configs.map((c) => "${c.name}[rem=${c.reminderEnabled},lead=${c.reminderMinutesBefore}m,enabled=${c.enabled}]").join(" | ")}',
+      );
       // Cancel only this app's reminder IDs (don't nuke the foreground service).
       for (final c in configs) {
         await cancelReminder(c.id);
@@ -232,6 +255,8 @@ class StrategyReminderService {
       }
       AppLogger.info('Reminder',
           'Synced ${configs.where((c) => c.reminderEnabled).length} active reminder(s)');
+      await logPendingReminders('after-sync');
+      await logActiveReminders('startup');
     } catch (e) {
       debugPrint('[Reminder] syncAllReminders failed: $e');
     }
@@ -273,6 +298,62 @@ class StrategyReminderService {
     return '$h12:${m.toString().padLeft(2, '0')} $period';
   }
 
+  static String _weekdayName(int weekday) {
+    const names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    return names[(weekday - 1).clamp(0, 6)];
+  }
+
+  static String _fmtTs(tz.TZDateTime t) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${t.year}-${two(t.month)}-${two(t.day)} '
+        '${two(t.hour)}:${two(t.minute)}:${two(t.second)}';
+  }
+
+  /// Dump the plugin's view of scheduled reminders to the app log. The single
+  /// most useful "did it actually register?" check — compare against
+  /// `adb shell dumpsys alarm`. Reminder slot IDs are >= 100000 (see _baseId).
+  static Future<void> logPendingReminders(String context) async {
+    if (!_initialized) return;
+    try {
+      final pending = await _plugin.pendingNotificationRequests();
+      final mine = pending.where((p) => p.id >= 100000).toList();
+      AppLogger.info(
+        'Reminder',
+        'PENDING[$context]: ${pending.length} total / ${mine.length} reminder slot(s) '
+        '| now=${_fmtTs(tz.TZDateTime.now(tz.local))}',
+      );
+      for (final p in mine) {
+        AppLogger.info(
+            'Reminder', '  pending id=${p.id} "${p.title}" — ${p.body}');
+      }
+    } catch (e) {
+      AppLogger.error('Reminder', 'logPendingReminders[$context] failed: $e');
+    }
+  }
+
+  /// Log notifications currently showing in the system tray (Android). On app
+  /// start this reveals whether a fired reminder is still sitting undismissed —
+  /// concrete proof of overnight delivery when "did it fire?" is the question.
+  static Future<void> logActiveReminders(String context) async {
+    if (!_initialized) return;
+    try {
+      final android = _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      if (android == null) return;
+      final active = await android.getActiveNotifications();
+      final mine = active.where((a) => (a.id ?? 0) >= 100000).toList();
+      AppLogger.info(
+        'Reminder',
+        'ACTIVE[$context]: ${active.length} in tray / ${mine.length} reminder(s) showing',
+      );
+      for (final a in mine) {
+        AppLogger.info('Reminder', '  active id=${a.id} "${a.title}"');
+      }
+    } catch (e) {
+      AppLogger.error('Reminder', 'logActiveReminders[$context] failed: $e');
+    }
+  }
+
   /// Notification tap handler — runs on the main isolate. Decodes the
   /// payload and pushes the strategy dashboard, or routes to the token
   /// entry screen if credentials aren't saved yet. If the user tapped the
@@ -280,6 +361,10 @@ class StrategyReminderService {
   /// navigating so the strategy is already running by the time the
   /// dashboard appears.
   static Future<void> _onNotificationTap(NotificationResponse response) async {
+    AppLogger.info(
+      'Reminder',
+      'TAP received: actionId=${response.actionId ?? "(body)"} payload=${response.payload}',
+    );
     final payload = response.payload;
     if (payload == null || payload.isEmpty) return;
 
