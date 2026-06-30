@@ -213,6 +213,15 @@ abstract class BaseStrategy {
   /// to skip). Default: null.
   BacktestDayResult? backtestDay(BacktestDayContext ctx) => null;
 
+  /// Async wrapper the backtest engine awaits, so a heavy custom engine can
+  /// yield to the event loop mid-day — letting the Dart GC reclaim per-stock
+  /// garbage (otherwise a caps-off run balloons the heap to multiple GB and the
+  /// OS kills the app) and keeping the UI responsive (no ANR). Defaults to the
+  /// synchronous [backtestDay], so strategies that don't override it behave
+  /// identically.
+  Future<BacktestDayResult?> backtestDayAsync(BacktestDayContext ctx) async =>
+      backtestDay(ctx);
+
   /// Run the full live/paper session (pre-market through square-off) using the
   /// engine services in [ctx]. Default: no-op.
   Future<void> runLive(LiveEngineContext ctx) async {}

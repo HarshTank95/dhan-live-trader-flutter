@@ -208,7 +208,7 @@ class BacktestEngine {
         if (_cancelled) break;
 
         final dayResult = strategy.hasCustomEngine
-            ? (strategy.backtestDay(
+            ? (await strategy.backtestDayAsync(
                     _BtDayContext(this, dateStr, stockDateCandles)) ??
                 _emptyDay(dateStr))
             : _simulateDay(
