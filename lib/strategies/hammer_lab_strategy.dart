@@ -1,5 +1,6 @@
 import 'package:candlesticks/candlesticks.dart';
 import 'package:uuid/uuid.dart';
+import '../data/nifty_tiers.dart';
 import '../models/backtest_result_model.dart';
 import '../models/candle_stats_model.dart';
 import '../models/strategy_signal_model.dart';
@@ -168,14 +169,38 @@ class HammerLabStrategy extends BaseStrategy {
         // and can be enabled here once C# fixes the bug and re-validates.
         'maxRangeMultVsPrevDay': 0.0,
         'minStopDistancePct': 0.0, // LAB: min stop-distance filter OFF
-        // First EARNED rule (mined from 2yr LAB logs): reject trigger candles
-        // whose range is <0.3% of price (noise). <0.3% = half the trades at 14%
-        // win; ≥0.3% = 28% win, robust both years. 0 = off.
-        'minTriggerRangePct': 0.3,
+        // ── THE FINAL STACK (mined 2yr, positive BOTH years, 6/8 quarters;
+        // +0.12–0.14R after costs, ~344 trades/yr): an OVERSOLD tier-500
+        // small-cap makes a violent wide-range bounce that TOUCHES a
+        // pivot-family level and reclaims it hard. Each rule below is one leg;
+        // all were validated per-year AND per-quarter before promotion. ──
+        //
+        // Wide trigger candle (was 0.3 noise-floor; 0.83 is the mined stack
+        // value — expectancy is monotonic in trigger range). 0 = off.
+        'minTriggerRangePct': 0.83,
         // EARNED support rule (mined 2yr): skip if the nearest resistance ABOVE
         // the entry is closer than this % (boxed-in bounce, no room to run —
         // loses more both years). No overhead level nearby always passes. 0=off.
         'minOverheadPct': 0.8,
+        // STACK: close must reclaim the level by ≥ this % (weak reclaims lose
+        // in every quarter — the bounce must be decisive). 0 = off.
+        'minReclaimPct': 0.58,
+        // STACK: the low may pierce the level by at most this % — support
+        // touched-and-held, not pierced-deep (firm rejection). -1 = off.
+        'maxPenetrationPct': 0.05,
+        // STACK: trade only pivot-family levels {CPR, P, CAM_L3, PDC, RN} —
+        // vCPR/PDL/PDH/S1/S2/TL/ZONE primaries lose (matches S1's independent
+        // exclusion of S1-pivot & PDH; CAM_L3 best in both strategies).
+        'pivotLevelsOnly': true,
+        // STACK: OVERSOLD gate — the stock's 5-day return must be BELOW this %
+        // (it's a reversion trade: buy the beaten-down bounce, not strength;
+        // aboveSma20 names actually do WORSE). 999 = off.
+        'maxStockRet5dPct': 0.0,
+        // STACK: Nifty-500 TAIL only (skip Nifty 50/100/200 members) — the
+        // edge is monotonic in size: mega-caps lose with these same filters,
+        // the small/mid tail wins both years. Applied to the UNIVERSE upfront
+        // (backtest per-stock skip + live pre-market skip). 0 = off.
+        'minIndexTier': 500,
         'minPrice': 50.0, // universe sanity floor (not an alpha rule) — kept
         // Support levels
         'supportLookbackDays': 60,
@@ -356,13 +381,72 @@ class HammerLabStrategy extends BaseStrategy {
             key: 'minTriggerRangePct',
             label: 'Min Trigger Range %',
             description:
-                'Reject trigger candles whose range is < this % of price '
-                '(noise filter). Mined: <0.3% wins 14%, ≥0.3% wins 28%. 0 = off.',
+                'Reject trigger candles whose range is < this % of price. '
+                'STACK rule: 0.83 (expectancy is monotonic in trigger range — '
+                'the bounce must be violent). 0 = off.',
             type: ParamType.decimal,
-            defaultValue: 0.3,
+            defaultValue: 0.83,
             min: 0.0,
             max: 3.0,
             unit: '%',
+            group: 'Risk Filters'),
+        const StrategyParamDef(
+            key: 'minReclaimPct',
+            label: 'Min Reclaim %',
+            description:
+                'Trigger close must reclaim the support level by ≥ this % '
+                '(weak reclaims lose in every quarter). STACK rule: 0.58. 0 = off.',
+            type: ParamType.decimal,
+            defaultValue: 0.58,
+            min: 0.0,
+            max: 3.0,
+            unit: '%',
+            group: 'Risk Filters'),
+        const StrategyParamDef(
+            key: 'maxPenetrationPct',
+            label: 'Max Penetration %',
+            description:
+                'Trigger low may pierce the level by at most this % — support '
+                'touched-and-held, not pierced-deep. STACK rule: 0.05. -1 = off.',
+            type: ParamType.decimal,
+            defaultValue: 0.05,
+            min: -1.0,
+            max: 2.0,
+            unit: '%',
+            group: 'Risk Filters'),
+        const StrategyParamDef(
+            key: 'pivotLevelsOnly',
+            label: 'Pivot-Family Levels Only',
+            description:
+                'Trade only when the PRIMARY (nearest) matched level is CPR, P, '
+                'CAM_L3, PDC or RN. Other level types lose as primaries.',
+            type: ParamType.boolean,
+            defaultValue: true,
+            group: 'Risk Filters'),
+        const StrategyParamDef(
+            key: 'maxStockRet5dPct',
+            label: 'Max 5-Day Return %',
+            description:
+                'OVERSOLD gate: trade only stocks whose 5-day return is below '
+                'this % (reversion trade — buy the beaten-down bounce). '
+                'STACK rule: 0.0. 999 = off.',
+            type: ParamType.decimal,
+            defaultValue: 0.0,
+            min: -20.0,
+            max: 999.0,
+            unit: '%',
+            group: 'Risk Filters'),
+        const StrategyParamDef(
+            key: 'minIndexTier',
+            label: 'Min Nifty Tier (50/100/200/500)',
+            description:
+                'Universe gate: trade only stocks whose smallest Nifty index is '
+                '≥ this (500 = Nifty-500 tail only, skipping Nifty 50/100/200 '
+                'members — mega-caps lose with these same filters). 0 = off.',
+            type: ParamType.integer,
+            defaultValue: 500,
+            min: 0,
+            max: 500,
             group: 'Risk Filters'),
         const StrategyParamDef(
             key: 'minOverheadPct',
@@ -633,6 +717,16 @@ class HammerLabStrategy extends BaseStrategy {
         return 'Trigger candles were tiny (<min range %) — noise, mined-out.';
       case 'no_overhead_room':
         return 'Resistance sat right above entry (<min room) — bounce boxed in.';
+      case 'pierced_too_deep':
+        return 'Lows cut deep through the level (>max penetration) — broken support, not a touch-and-hold.';
+      case 'weak_reclaim':
+        return 'Closes barely cleared the level (<min reclaim) — indecisive bounce.';
+      case 'level_type':
+        return 'Primary level not in the pivot family (CPR/P/CAM_L3/PDC/RN) — other types lose as primaries.';
+      case 'index_tier':
+        return 'Stock is a Nifty 50/100/200 member — mega-caps lose this setup; tail-only universe.';
+      case 'not_oversold':
+        return '5-day return not below the oversold cap — reversion setup needs a beaten-down stock.';
       case 'not_at_support':
         return 'Triggers formed but none probed an enabled support level.';
       case 'exact_tick':
@@ -1193,6 +1287,32 @@ class HammerLabStrategy extends BaseStrategy {
             'nearest resistance ${overhead.toStringAsFixed(2)}% above < min ${p.minOverheadPct.toStringAsFixed(2)}% (no room to run)');
         continue;
       }
+      // ── STACK gates (mined 2yr, positive both years — see defaultParams) ──
+      final penetration =
+          c.low < prim.lo ? (prim.lo - c.low) / prim.lo * 100 : 0.0;
+      final reclaim = prim.lo > 0 ? (c.close - prim.lo) / prim.lo * 100 : 0.0;
+      // Touch-not-pierce: a low that cuts deep through the level is a broken
+      // support fighting back, not a firm rejection.
+      if (p.maxPenetrationPct >= 0 && gtTol(penetration, p.maxPenetrationPct)) {
+        note(6, 'pierced_too_deep',
+            'low pierced the level ${penetration.toStringAsFixed(3)}% > max ${p.maxPenetrationPct.toStringAsFixed(2)}% (touch-not-pierce)');
+        continue;
+      }
+      // Decisive reclaim: the close must clear the level by a real margin.
+      if (p.minReclaimPct > 0 && ltTol(reclaim, p.minReclaimPct)) {
+        note(6, 'weak_reclaim',
+            'close reclaimed only ${reclaim.toStringAsFixed(3)}% > level < min ${p.minReclaimPct.toStringAsFixed(2)}%');
+        continue;
+      }
+      // Pivot-family primaries only (CPR/P/CAM_L3/PDC/RN win; others lose).
+      if (p.pivotLevelsOnly) {
+        final lt = levelType(prim.tag);
+        if (!const {'CPR', 'P', 'CAM_L3', 'PDC', 'RN'}.contains(lt)) {
+          note(6, 'level_type',
+              'primary level $lt not in the pivot family {CPR, P, CAM_L3, PDC, RN}');
+          continue;
+        }
+      }
       final feats = <String, dynamic>{
         'primaryFresh': prim.fresh, // daily-virgin (no recent daily touch)
         'testsToday': testsToday, // intraday touches before this bar (0 = first)
@@ -1378,6 +1498,12 @@ class HammerLabStrategy extends BaseStrategy {
     final p = HammerLabParams(ctx.params);
     final tradeDay = DateTime.parse(ctx.dateStr);
 
+    // Market-breadth regime snapshot, once per day (live-safe: prior daily
+    // candles only). Day-clustering showed the worst 20% of days carry 56% of
+    // the total loss — this is the "is today a healthy market for dip-buying"
+    // feature the mining needs at entry time.
+    final breadth = _dayBreadth(tradeDay);
+
     int stocksScanned = 0;
     int triggers = 0;
     final dayRejects = <String, int>{};
@@ -1429,6 +1555,20 @@ class HammerLabStrategy extends BaseStrategy {
 
       final scrip = ctx.scripService.findById(secId);
       final symbol = scrip?.symbol ?? secId.toString();
+
+      // STACK universe gate: Nifty-500 tail only (skip Nifty 50/100/200
+      // members) — mega-caps lose with these same filters, both years.
+      if (p.minIndexTier > 0 && NiftyTiers.tier(symbol) < p.minIndexTier) {
+        dayRejects['index_tier'] = (dayRejects['index_tier'] ?? 0) + 1;
+        continue;
+      }
+      // STACK oversold gate: 5-day return must be below the cap (reversion
+      // trade — buy the beaten-down bounce, not strength). Prior dailies only.
+      if (p.maxStockRet5dPct < 999 &&
+          _ret5dPct(dailyBefore) >= p.maxStockRet5dPct) {
+        dayRejects['not_oversold'] = (dayRejects['not_oversold'] ?? 0) + 1;
+        continue;
+      }
 
       // Prev-day avg bar range from the prior trading day's intraday bars.
       final priorDates = byDate.keys
@@ -1515,6 +1655,12 @@ class HammerLabStrategy extends BaseStrategy {
           ...?scan.supportFeatures, // freshness/strength/pierce/overhead
           'avgDailyVol':
               double.parse(_avgDailyVolume(dailyBefore, 20).toStringAsFixed(0)),
+          // Daily trend context (live-safe): is this dip-buy in an uptrend?
+          ..._trendFeatures(dailyBefore, trig.close),
+          // Nifty index tier (50/100/200/500) — size/liquidity proxy.
+          'indexTier': NiftyTiers.tier(symbol),
+          // Market-breadth regime (live-safe, pre-market): healthy market?
+          ...breadth,
         },
       );
 
@@ -1552,6 +1698,45 @@ class HammerLabStrategy extends BaseStrategy {
       final et =
           '${trade.entryTime!.hour.toString().padLeft(2, '0')}:${trade.entryTime!.minute.toString().padLeft(2, '0')}';
       final risk = trade.entryPrice - trade.stopLoss;
+
+      // ── EXIT-RESEARCH payload (outcome data, NEVER entry filters) ──
+      // Per-bar high/low in R from the entry bar to SESSION END (past the
+      // recorded exit on purpose), plus the NEXT day's full bar path, so
+      // alternative exits — fixed target+SL, earlier/looser trails,
+      // scale-outs, hold-overnight-exit-next-day — replay EXACTLY offline
+      // instead of being estimated from MFE summaries (the mirage trap that
+      // burned the first trail estimate). Next-day path (not just OHLC)
+      // because a resting target+SL needs to know which level hit FIRST.
+      // Max hold under study is 2 sessions — nothing beyond next day is kept.
+      double toR(double v) => risk > 0
+          ? double.parse(((v - trade.entryPrice) / risk).toStringAsFixed(2))
+          : 0;
+      final pathHL = <double>[];
+      if (risk > 0) {
+        for (int j = k + 1; j < today.length; j++) {
+          pathHL
+            ..add(toR(today[j].high))
+            ..add(toR(today[j].low));
+        }
+      }
+      final ndPathHL = <double>[];
+      double ndOpenR = 0, ndCloseR = 0;
+      final nextDates = byDate.keys
+          .where((d) => d.compareTo(ctx.dateStr) > 0)
+          .toList()
+        ..sort();
+      if (risk > 0 && nextDates.isNotEmpty) {
+        final nd = byDate[nextDates.first]!;
+        if (nd.isNotEmpty) {
+          ndOpenR = toR(nd.first.open);
+          ndCloseR = toR(nd.last.close);
+          for (final c in nd) {
+            ndPathHL
+              ..add(toR(c.high))
+              ..add(toR(c.low));
+          }
+        }
+      }
       // Human line (kept stable for quick greps) + a full features payload —
       // everything the post-run mining cross-tabs need, computable at entry
       // or exit, in one structured record per trade.
@@ -1606,6 +1791,18 @@ class HammerLabStrategy extends BaseStrategy {
           ..._volFeatures(today, k, _avgDailyVolume(dailyBefore, 20)),
           'avgDailyVol': double.parse(_avgDailyVolume(dailyBefore, 20).toStringAsFixed(0)),
           'cprWidthPct': double.parse(_cprWidthPct(dailyBefore).toStringAsFixed(3)),
+          // Daily trend context (live-safe): is this dip-buy in an uptrend?
+          ..._trendFeatures(dailyBefore, trade.entryPrice),
+          // Nifty index tier (50/100/200/500) — size/liquidity proxy.
+          'indexTier': NiftyTiers.tier(trade.symbol),
+          // Market-breadth regime (live-safe, pre-market): healthy market?
+          ...breadth,
+          // Exit-research paths (see block above): entry-day + next-day bar
+          // paths in R. Empty ndPathHL = next day not in this chunk.
+          'pathHL': pathHL,
+          'ndOpenR': ndOpenR,
+          'ndCloseR': ndCloseR,
+          'ndPathHL': ndPathHL,
         },
       );
       ctx.log('TRADE [${ctx.dateStr} $et]: ${trade.symbol} Entry=${trade.entryPrice.toStringAsFixed(2)} Qty=${trade.quantity} SL=${trade.stopLoss.toStringAsFixed(2)}${trade.target > 0 ? " Tgt=${trade.target.toStringAsFixed(2)}" : " (trail)"} → ${trade.outcome.name}[${exec.exitKind}] Exit=${trade.exitPrice?.toStringAsFixed(2)} P&L=₹${trade.pnl.toStringAsFixed(0)} | ${scan.supportNote}');
@@ -1711,7 +1908,19 @@ class HammerLabStrategy extends BaseStrategy {
       if (dailyBefore.isEmpty) continue;
 
       final scrip = ctx.scripService.findById(secId);
-      symbols[secId] = scrip?.symbol ?? secId.toString();
+      final sym = scrip?.symbol ?? secId.toString();
+
+      // STACK universe + oversold gates — identical to backtestDay, decided
+      // pre-market from prior dailies only, so live and backtest agree. A
+      // skipped stock gets no levels → inPlay (prep.levels.keys) excludes it
+      // for the whole session.
+      if (p.minIndexTier > 0 && NiftyTiers.tier(sym) < p.minIndexTier) continue;
+      if (p.maxStockRet5dPct < 999 &&
+          _ret5dPct(dailyBefore) >= p.maxStockRet5dPct) {
+        continue;
+      }
+
+      symbols[secId] = sym;
       levels[secId] = computeDayLevels(dailyBefore, ctx.params);
       prevClose[secId] = dailyBefore.last.close; // for the gap pre-filter
       avgDailyVol[secId] = _avgDailyVolume(dailyBefore, 20); // for the liquidity filter
@@ -2350,6 +2559,16 @@ class HammerLabStrategy extends BaseStrategy {
     return (supportNote ?? '').contains('CAM_L3'); // Camarilla-L3 bypass
   }
 
+  /// Stock's 5-trading-day return % from PRIOR daily candles (same math as
+  /// [_trendFeatures]' stockRet5d, so the gate and the logged field agree).
+  /// 0 when history is insufficient — which fails a `< 0` oversold gate,
+  /// matching how the mining excluded those trades.
+  static double _ret5dPct(List<Candle> daily) {
+    if (daily.length <= 5) return 0;
+    final past = daily[daily.length - 6].close;
+    return past > 0 ? (daily.last.close - past) / past * 100 : 0;
+  }
+
   static double _avgDailyVolume(List<Candle> daily, int days) {
     if (daily.isEmpty) return 0;
     final s = daily.length - days < 0 ? 0 : daily.length - days;
@@ -2360,6 +2579,111 @@ class HammerLabStrategy extends BaseStrategy {
       cnt++;
     }
     return cnt > 0 ? sum / cnt : 0;
+  }
+
+  /// Universe-wide market-breadth snapshot for [tradeDay] from PRIOR daily
+  /// candles only (live-safe — computable pre-market). Fraction of the
+  /// universe whose last close sits above its 20-day SMA, plus the universe's
+  /// average 5-day return: "is this a healthy market for dip-buying today".
+  /// Index-free on purpose — derived from the same ~500 stocks' daily candles
+  /// the strategy already loads, so it costs zero extra downloads.
+  Map<String, dynamic> _dayBreadth(DateTime tradeDay) {
+    int above = 0, counted = 0, retCnt = 0;
+    double retSum = 0;
+    for (final daily in _dailyData.values) {
+      // Cutoff index: bars strictly before the trade day (same rule as
+      // dailyBefore). Backwards scan — no list allocation per stock/day.
+      int end = daily.length;
+      while (end > 0 && !daily[end - 1].date.isBefore(tradeDay)) {
+        end--;
+      }
+      if (end < 21) continue;
+      final last = daily[end - 1].close;
+      double sum = 0;
+      for (int j = end - 20; j < end; j++) {
+        sum += daily[j].close;
+      }
+      final sma20 = sum / 20;
+      if (sma20 > 0) {
+        counted++;
+        if (last > sma20) above++;
+      }
+      final past = daily[end - 6].close;
+      if (past > 0) {
+        retSum += (last - past) / past * 100;
+        retCnt++;
+      }
+    }
+    return {
+      'breadthAbove20Pct': counted > 0
+          ? double.parse((100 * above / counted).toStringAsFixed(1))
+          : -1,
+      'breadthRet5dPct': retCnt > 0
+          ? double.parse((retSum / retCnt).toStringAsFixed(2))
+          : 0,
+      'breadthN': counted,
+    };
+  }
+
+  /// Daily TREND context (LAB, live-safe: prior daily candles + entry price
+  /// only — nothing from today's forming session). A support-bounce-long is a
+  /// buy-the-dip: this lets the mining test whether the edge lives only when the
+  /// stock is in a daily UPTREND (dip in an uptrend) vs a DOWNTREND (falling
+  /// knife). [price] is the entry (trade record) or trigger close (scan record).
+  static Map<String, dynamic> _trendFeatures(List<Candle> daily, double price) {
+    double sma(int n) {
+      if (daily.isEmpty) return 0;
+      final s = daily.length - n < 0 ? 0 : daily.length - n;
+      double sum = 0;
+      int cnt = 0;
+      for (int j = s; j < daily.length; j++) {
+        sum += daily[j].close;
+        cnt++;
+      }
+      return cnt > 0 ? sum / cnt : 0;
+    }
+
+    // SMA over [n] bars ending [backFromEnd] trading days before the last bar —
+    // for measuring the SMA's own slope (is the trend accelerating/rolling over).
+    double smaBack(int n, int backFromEnd) {
+      final end = daily.length - backFromEnd;
+      if (end <= 0) return 0;
+      final s = end - n < 0 ? 0 : end - n;
+      double sum = 0;
+      int cnt = 0;
+      for (int j = s; j < end; j++) {
+        sum += daily[j].close;
+        cnt++;
+      }
+      return cnt > 0 ? sum / cnt : 0;
+    }
+
+    double ret(int n) {
+      if (daily.length <= n) return 0;
+      final past = daily[daily.length - 1 - n].close;
+      final last = daily.last.close;
+      return past > 0 ? (last - past) / past * 100 : 0;
+    }
+
+    final sma20 = sma(20), sma50 = sma(50), sma20Prev = smaBack(20, 5);
+    return {
+      // Position vs the moving averages: >0 = trading above the MA (uptrend).
+      'sma20DistPct': sma20 > 0
+          ? double.parse(((price - sma20) / sma20 * 100).toStringAsFixed(2))
+          : 0,
+      'sma50DistPct': sma50 > 0
+          ? double.parse(((price - sma50) / sma50 * 100).toStringAsFixed(2))
+          : 0,
+      'aboveSma20': sma20 > 0 && price > sma20,
+      'aboveSma50': sma50 > 0 && price > sma50,
+      // 20>50 alignment = classic uptrend stack.
+      'smaStack': sma20 > 0 && sma50 > 0 && sma20 > sma50,
+      // 20-SMA rising over the last 5 sessions = trend still up, not rolling over.
+      'sma20Rising': sma20 > 0 && sma20Prev > 0 && sma20 > sma20Prev,
+      // Recent momentum.
+      'stockRet5d': double.parse(ret(5).toStringAsFixed(2)),
+      'stockRet20d': double.parse(ret(20).toStringAsFixed(2)),
+    };
   }
 
   /// Yesterday's CPR band width as % of pivot — narrow = trending day,
@@ -2599,6 +2923,12 @@ class HammerLabParams {
   double get minStopDistancePct => _d('minStopDistancePct', 0.8);
   double get minTriggerRangePct => _d('minTriggerRangePct', 0.0);
   double get minOverheadPct => _d('minOverheadPct', 0.0);
+  // The FINAL STACK gates (mined 2yr, positive both years — see defaultParams)
+  double get minReclaimPct => _d('minReclaimPct', 0.0);
+  double get maxPenetrationPct => _d('maxPenetrationPct', -1.0);
+  bool get pivotLevelsOnly => _b('pivotLevelsOnly', false);
+  double get maxStockRet5dPct => _d('maxStockRet5dPct', 999.0);
+  int get minIndexTier => _i('minIndexTier', 0);
   double get minPrice => _d('minPrice', 50.0);
   // Support
   int get supportLookbackDays => _i('supportLookbackDays', 60);
