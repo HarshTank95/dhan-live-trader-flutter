@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/backtest_result_model.dart';
 import '../models/daily_run_summary_model.dart';
@@ -228,49 +230,106 @@ class StorageService {
   }
 
   // ── Backtest Results ──────────────────────────────────────────────────
-  static Future<void> saveBacktestResult(BacktestResultModel result) async {
+  // One JSON file per result under {appDocs}/backtest_results/. Results used
+  // to live as ONE giant string in SharedPreferences — a multi-year run holds
+  // thousands of trades, so a few runs made the prefs blob tens of MB, and
+  // Android rewrites the WHOLE prefs file on EVERY write (progress updates,
+  // activity flushes...). That made the second backtest of a session jank/ANR.
+  // Files keep prefs tiny; the public API is unchanged.
+
+  static Future<Directory> _backtestResultsDir() async {
+    final docs = await getApplicationDocumentsDirectory();
+    final dir = Directory('${docs.path}/backtest_results');
+    if (!await dir.exists()) await dir.create(recursive: true);
+    return dir;
+  }
+
+  /// Sanitize an id for use as a file name (ids are UUIDs today; be safe).
+  static String _resultFileName(String id) =>
+      '${id.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_')}.json';
+
+  /// One-time migration: move any results still in the legacy prefs blob to
+  /// files, then drop the prefs key (frees the multi-MB string for good).
+  static Future<void> _migrateLegacyBacktestResults() async {
     final prefs = await SharedPreferences.getInstance();
-    final results = await loadBacktestResults();
-
-    // Replace existing with same ID, or add new
-    results.removeWhere((r) => r.id == result.id);
-    results.insert(0, result); // newest first
-
-    // Keep max 20 backtest results
-    if (results.length > 20) {
-      results.removeRange(20, results.length);
+    final json = prefs.getString(_keyBacktestResults);
+    if (json == null) return;
+    try {
+      final dir = await _backtestResultsDir();
+      final list = jsonDecode(json) as List<dynamic>;
+      for (final e in list) {
+        final m = e as Map<String, dynamic>;
+        final id = (m['id'] ?? '') as String;
+        if (id.isEmpty) continue;
+        final f = File('${dir.path}/${_resultFileName(id)}');
+        if (!await f.exists()) await f.writeAsString(jsonEncode(m));
+      }
+    } catch (_) {
+      // Corrupt legacy blob — nothing to salvage; fall through to remove it.
     }
+    await prefs.remove(_keyBacktestResults);
+  }
 
-    final json = jsonEncode(results.map((r) => r.toJson()).toList());
-    await prefs.setString(_keyBacktestResults, json);
+  static Future<void> saveBacktestResult(BacktestResultModel result) async {
+    await _migrateLegacyBacktestResults();
+    final dir = await _backtestResultsDir();
+    await File('${dir.path}/${_resultFileName(result.id)}')
+        .writeAsString(jsonEncode(result.toJson()));
+
+    // Keep max 20 results — drop the oldest files beyond that.
+    final files = await _listResultFiles(dir);
+    if (files.length > 20) {
+      for (final f in files.sublist(20)) {
+        try {
+          await f.delete();
+        } catch (_) {}
+      }
+    }
+  }
+
+  /// Result files, newest first (by modification time).
+  static Future<List<File>> _listResultFiles(Directory dir) async {
+    final files = <File>[];
+    await for (final e in dir.list()) {
+      if (e is File && e.path.endsWith('.json')) files.add(e);
+    }
+    files.sort((a, b) =>
+        b.statSync().modified.compareTo(a.statSync().modified));
+    return files;
   }
 
   static Future<List<BacktestResultModel>> loadBacktestResults() async {
-    final prefs = await SharedPreferences.getInstance();
-    final json = prefs.getString(_keyBacktestResults);
-    if (json == null) return [];
-    try {
-      final list = jsonDecode(json) as List<dynamic>;
-      return list
-          .map((e) =>
-              BacktestResultModel.fromJson(e as Map<String, dynamic>))
-          .toList();
-    } catch (_) {
-      return [];
+    await _migrateLegacyBacktestResults();
+    final dir = await _backtestResultsDir();
+    final results = <BacktestResultModel>[];
+    for (final f in await _listResultFiles(dir)) {
+      try {
+        results.add(BacktestResultModel.fromJson(
+            jsonDecode(await f.readAsString()) as Map<String, dynamic>));
+      } catch (_) {
+        // Skip unreadable/corrupt file rather than failing the whole list.
+      }
     }
+    results.sort((a, b) => b.runAt.compareTo(a.runAt)); // newest first
+    return results;
   }
 
   static Future<void> deleteBacktestResult(String id) async {
-    final prefs = await SharedPreferences.getInstance();
-    final results = await loadBacktestResults();
-    results.removeWhere((r) => r.id == id);
-    final json = jsonEncode(results.map((r) => r.toJson()).toList());
-    await prefs.setString(_keyBacktestResults, json);
+    await _migrateLegacyBacktestResults();
+    final dir = await _backtestResultsDir();
+    final f = File('${dir.path}/${_resultFileName(id)}');
+    if (await f.exists()) await f.delete();
   }
 
   static Future<void> clearAllBacktestResults() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_keyBacktestResults);
+    await prefs.remove(_keyBacktestResults); // legacy blob, if any
+    final dir = await _backtestResultsDir();
+    for (final f in await _listResultFiles(dir)) {
+      try {
+        await f.delete();
+      } catch (_) {}
+    }
   }
 
   // ── Trading Mode (Paper / Live) ─────────────────────────────────────

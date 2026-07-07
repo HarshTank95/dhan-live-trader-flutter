@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../services/backtest_engine.dart';
 import '../services/scrip_service.dart';
@@ -49,7 +50,18 @@ class _BacktestProgressScreenState extends State<BacktestProgressScreen> {
   @override
   void initState() {
     super.initState();
+    // Keep the screen ON for the whole run: with the display off, Android
+    // (vivo/oppo ROMs especially) demotes the app out of the foreground state
+    // and throttles/freezes the CPU — the backtest crawls or stalls. Released
+    // in dispose() and as soon as the run ends, so normal use is unaffected.
+    WakelockPlus.enable();
     _startBacktest();
+  }
+
+  @override
+  void dispose() {
+    WakelockPlus.disable();
+    super.dispose();
   }
 
   Future<void> _startBacktest() async {
@@ -98,6 +110,7 @@ class _BacktestProgressScreenState extends State<BacktestProgressScreen> {
         _running = false;
         _done = true;
       });
+      WakelockPlus.disable(); // run finished — let the screen sleep again
 
       // Navigate to results
       if (mounted) {
@@ -108,6 +121,11 @@ class _BacktestProgressScreenState extends State<BacktestProgressScreen> {
         );
       }
     } catch (e) {
+      WakelockPlus.disable(); // failed run — release the screen too
+      // Truthful run status + checkpoint survive: the Runs tab will show
+      // "failed … data through <lastSimDate>" so only the remainder needs
+      // re-running.
+      await _engine?.markRunFailed('$e');
       if (!mounted) return;
       setState(() {
         _running = false;

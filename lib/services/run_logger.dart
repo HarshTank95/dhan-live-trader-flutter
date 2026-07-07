@@ -340,6 +340,12 @@ class RunLogIndex {
   final int finalActiveStocks;
   final double totalPnl;
 
+  /// Backtest checkpoint: last fully-simulated trading date (yyyy-MM-dd),
+  /// written after every day so it survives cancels/network drops/crashes.
+  /// An interrupted run can be re-run from the day AFTER this date. Empty
+  /// for live runs and for backtests from before this feature.
+  final String lastSimDate;
+
   RunLogIndex({
     required this.runId,
     required this.date,
@@ -356,6 +362,7 @@ class RunLogIndex {
     required this.totalStocks,
     required this.finalActiveStocks,
     required this.totalPnl,
+    this.lastSimDate = '',
   });
 
   factory RunLogIndex.fromJson(Map<String, dynamic> m) => RunLogIndex(
@@ -374,6 +381,7 @@ class RunLogIndex {
         totalStocks: (m['totalStocks'] as num?)?.toInt() ?? 0,
         finalActiveStocks: (m['finalActiveStocks'] as num?)?.toInt() ?? 0,
         totalPnl: (m['totalPnl'] as num?)?.toDouble() ?? 0,
+        lastSimDate: m['lastSimDate'] as String? ?? '',
       );
 }
 

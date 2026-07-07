@@ -252,6 +252,18 @@ class BacktestEngine {
           'losses': dayResult.losses,
           'dayPnl': dayResult.dayPnl,
         });
+
+        // Crash-safe progress checkpoint: persist the last fully-simulated
+        // date (plus running totals) to the run's meta file after EVERY day.
+        // If the run dies mid-way — cancel, network glitch, crash — the Runs
+        // tab shows exactly how far it got, so the user re-runs only the
+        // remaining range instead of starting over. Tiny (<1 KB) write.
+        await _runLog?.updateMeta({
+          'lastSimDate': dateStr,
+          'daysDone': daysDone,
+          'trades': runTrades,
+          'totalPnl': runPnl,
+        });
       }
 
       // FREE this chunk's candles before fetching the next one — this is the
@@ -319,6 +331,22 @@ class BacktestEngine {
     );
     await _closeBacktestLog(result, _cancelled ? 'cancelled' : 'completed');
     return result;
+  }
+
+  /// Mark the run log FAILED — called by the progress screen when [run]
+  /// throws (network glitch, crash-adjacent error). The per-day checkpoint
+  /// has already recorded `lastSimDate`, so the Runs tab shows both the
+  /// failure and exactly how far the simulation got before it.
+  Future<void> markRunFailed(String error) async {
+    if (_runLog == null) return;
+    final now = DateTime.now();
+    _runLog!.error('Backtest', 'RUN FAILED: $error');
+    await _runLog!.close(
+      status: 'failed',
+      endTime:
+          '${now.hour.toString().padLeft(2, "0")}:${now.minute.toString().padLeft(2, "0")}:${now.second.toString().padLeft(2, "0")}',
+    );
+    _runLog = null;
   }
 
   /// Finalize the backtest run log with summary stats. Safe to call multiple

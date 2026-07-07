@@ -492,6 +492,21 @@ class _RunCard extends StatelessWidget {
                 '${run.endTime.isNotEmpty ? " → ${run.endTime}" : ""}',
                 style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
               ),
+              // Interrupted backtest (cancel / network / crash): show the
+              // resume checkpoint — the last fully-simulated date — so the
+              // user re-runs only the remaining range.
+              if (run.kind == 'backtest' &&
+                  run.status != 'completed' &&
+                  run.lastSimDate.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(
+                  '⏸ simulated through ${run.lastSimDate} — resume from the next day',
+                  style: const TextStyle(
+                      fontSize: 12,
+                      color: Colors.orange,
+                      fontWeight: FontWeight.w600),
+                ),
+              ],
               const SizedBox(height: 8),
               Row(
                 children: [
