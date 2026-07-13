@@ -31,6 +31,13 @@ class StrategyTradeModel {
   /// Gap Fade sets 0.10% to match the C# net-of-cost benchmark.
   final double costModelPct;
 
+  /// Short-sell direction (sell to open, buy to cover). Only the ORB backtest
+  /// sets this today; every long-only strategy leaves the default false, so
+  /// existing trades/configs (which have no such key) deserialize unchanged.
+  /// The live order path still places BUY only — shorts stay backtest/paper
+  /// until Phase 2 wires a SELL entry leg.
+  final bool isShort;
+
   StrategyTradeModel({
     required this.id,
     required this.strategyConfigId,
@@ -49,13 +56,17 @@ class StrategyTradeModel {
     required this.stopLoss,
     required this.target,
     this.costModelPct = 0,
+    this.isShort = false,
   });
+
+  /// +1 for longs, −1 for shorts — flips the sign of every price-move getter.
+  int get _dir => isShort ? -1 : 1;
 
   // Computed
   double get pnl {
     final exit = exitPrice ?? 0;
     if (status == TradeStatus.closed && exit > 0) {
-      final gross = (exit - entryPrice) * quantity;
+      final gross = (exit - entryPrice) * quantity * _dir;
       // Cost on both legs: (entry + exit) × qty × pct / 200 (pct is round-trip).
       final cost = (entryPrice + exit) * quantity * costModelPct / 200.0;
       return gross - cost;
@@ -67,13 +78,13 @@ class StrategyTradeModel {
     if (entryPrice <= 0) return 0;
     final exit = exitPrice ?? 0;
     if (status == TradeStatus.closed && exit > 0) {
-      return ((exit - entryPrice) / entryPrice) * 100;
+      return ((exit - entryPrice) / entryPrice) * 100 * _dir;
     }
     return 0;
   }
 
-  double get riskAmount => (entryPrice - stopLoss) * quantity;
-  double get rewardAmount => (target - entryPrice) * quantity;
+  double get riskAmount => (entryPrice - stopLoss) * quantity * _dir;
+  double get rewardAmount => (target - entryPrice) * quantity * _dir;
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -93,6 +104,7 @@ class StrategyTradeModel {
         'stopLoss': stopLoss,
         'target': target,
         'costModelPct': costModelPct,
+        'isShort': isShort,
       };
 
   factory StrategyTradeModel.fromJson(Map<String, dynamic> json) =>
@@ -122,5 +134,6 @@ class StrategyTradeModel {
         stopLoss: (json['stopLoss'] as num).toDouble(),
         target: (json['target'] as num).toDouble(),
         costModelPct: (json['costModelPct'] as num?)?.toDouble() ?? 0,
+        isShort: json['isShort'] as bool? ?? false,
       );
 }
