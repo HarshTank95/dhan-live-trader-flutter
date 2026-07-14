@@ -151,11 +151,13 @@ class OrbStrategy extends BaseStrategy {
       '1.5×, skip instant breaks, ≥1% open→entry momentum, range closed on '
       'the break side, market-activity floor ≥30 universe breakouts, ATR ≥ '
       '3%, NO target, stop at 0.5× the range (failed-break cut), hold to '
-      '15:20, daily loss stop −2R realized. No day trade cap. FINAL CONFIG — '
-      'passed the untouched 2022-23 exam (+0.132R pure OOS); 4yr master '
-      'book at these defaults: +0.185R / PF 1.45 / ₹327k @₹500 risk / '
-      '17-of-17 quarters positive / maxDD ₹12k. Gated breakouts are '
-      'Shadow-logged with would-have outcomes. Next phase: paper trading.';
+      '15:20, daily loss stop −2R realized. No day trade cap. OPTION-C '
+      'concentration: only setups with ≥1 conviction tilt (price<₹100 / '
+      'range 3.5-5% / below SMA20). Passed the untouched 2022-23 exam '
+      '(+0.132R pure OOS); Option-C book on the 4yr master: ~2.1 tr/day, '
+      '₹123/trade @₹500 risk, PF 1.67, ₹258k, 17-of-17 quarters positive. '
+      'Gated breakouts are Shadow-logged with would-have outcomes. Next '
+      'phase: paper trading.';
 
   // ── Per-run state ────────────────────────────────────────────────────────
   /// Daily candles per stock (oldest first) — ATR/trend/breadth/gap context.
@@ -193,6 +195,13 @@ class OrbStrategy extends BaseStrategy {
         'maxOppTouches': 1.0, // -1 = off; skip bars whose other end was tested 2+ times first
         'minTapeTotal': 30.0, // market-activity floor (mined 20→30 on run-28473: 13/13 quarters)
         'dailyStopR': 2.0, // stop NEW entries once REALIZED day P&L <= -2R (closed trades only)
+        // OPTION C (2026-07-13, user-chosen concentration): trade only
+        // setups carrying >= this many of the three tilts that replicated
+        // on every book (each positive-everywhere, never cuttable):
+        //   price < 100  |  rangePct in [3.5, 5)  |  below 20-day SMA.
+        // 1 → ~2.1 tr/day, ₹123/trade, PF 1.67, 17/17 quarters, ₹258k/4yr
+        // (vs full book 3.5/day, ₹87/trade, ₹301k). 0 = off (full book).
+        'requireTiltCount': 1.0,
         // Longs only (mined run-28473, 3yr): longs +0.064R/PF 1.28 vs shorts
         // +0.025R and NEGATIVE in the recent year; longs+tape30 = +0.081R /
         // PF 1.38 / 13/13 quarters. Execution-side switch — short breakouts
@@ -420,6 +429,20 @@ class OrbStrategy extends BaseStrategy {
           defaultValue: 30,
           min: 0,
           max: 200,
+          group: 'Stack rules',
+        ),
+        StrategyParamDef(
+          key: 'requireTiltCount',
+          label: 'Min conviction tilts',
+          description:
+              'Trade only setups with at least this many proven signs: '
+              'price < ₹100, range width 3.5-5%, or below the 20-day SMA. '
+              '1 = the Option-C book (₹123/trade, PF 1.67, 17/17 quarters). '
+              '0 = off (trade every qualifying breakout).',
+          type: ParamType.integer,
+          defaultValue: 1,
+          min: 0,
+          max: 3,
           group: 'Stack rules',
         ),
         StrategyParamDef(
@@ -765,6 +788,8 @@ class OrbStrategy extends BaseStrategy {
         return 'Realized day P&L hit -dailyStopR — no new entries for the day (open trades still managed).';
       case 'short_disabled':
         return 'Short breakout skipped (tradeLongsOnly) — still tape-counted and Shadow-logged.';
+      case 'no_tilt':
+        return 'Qualifying breakout without any conviction tilt (price<100 / range 3.5-5% / below SMA20) — Option-C concentration skips it; Shadow tracks what it would have done.';
       case 'skipped_capital':
         return 'Trade notional above maxCapitalPerTrade.';
       case 'gap_band':
@@ -1140,6 +1165,10 @@ class OrbStrategy extends BaseStrategy {
         // Market-activity floor — uses the RAW tape strictly before this
         // bar; all breakouts count, including gate-skipped ones.
         gated = 'tape_quiet';
+      } else if (p.requireTiltCount > 0 &&
+          _tiltCount(c.s, c.b) < p.requireTiltCount) {
+        // Option C: concentration on the three replicated conviction tilts.
+        gated = 'no_tilt';
       } else if (p.dailyStopR > 0 && realizedR <= -p.dailyStopR) {
         // Daily loss stop on a REALIZED basis — exactly what live can know.
         gated = 'daily_stop';
@@ -1552,6 +1581,7 @@ class OrbStrategy extends BaseStrategy {
         'tapeL': b.tapeL,
         'tapeS': b.tapeS,
         'realizedAtEntry': double.parse(realizedAtEntry.toStringAsFixed(2)),
+        'tiltCount': _tiltCount(s, b),
         // The would-have outcome (null exec = would never have filled/sized).
         'wouldExitKind': exec?.exitKind,
         'wouldR': exec != null
@@ -1662,6 +1692,8 @@ class OrbStrategy extends BaseStrategy {
         // live-safe): long vs short breakouts fired earlier today.
         'tapeL': b.tapeL,
         'tapeS': b.tapeS,
+        // Conviction tilts carried (0-3) — sizing research + Option-C audit.
+        'tiltCount': _tiltCount(s, b),
         // Portfolio context at entry (research: pileup/sequencing rules).
         'tradeSeq': tradeSeq, // 1 = first kept trade of the day
         'openAtEntry': openAtEntry, // positions still running at this entry
@@ -1714,6 +1746,17 @@ class OrbStrategy extends BaseStrategy {
       'status': 'stopped',
       'message': 'ORB: backtest-only research build — no live session yet.',
     });
+  }
+
+  /// Conviction tilts (each replicated positive-everywhere on every mined
+  /// book): cheap stock, sweet-spot range width, beaten-down breakout.
+  /// Entry-time-safe: price is the fill, the rest are setup fields.
+  static int _tiltCount(OrbSetup s, OrbBreakout b) {
+    int n = 0;
+    if (b.entryPrice < 100) n++;
+    if (s.rangePct >= 3.5 && s.rangePct < 5) n++;
+    if (s.trendFeatures['aboveSma20'] == false) n++;
+    return n;
   }
 
   // ── Feature helpers (entry-time-safe — prior/completed data only) ────────
@@ -1926,6 +1969,7 @@ class OrbParams {
   double get dailyStopR => _d('dailyStopR', 0.0);
   bool get tradeLongsOnly => _b('tradeLongsOnly', false);
   bool get logShadowTrades => _b('logShadowTrades', false);
+  int get requireTiltCount => _i('requireTiltCount', 0);
   // Stocks in Play
   double get minRelVol => _d('minRelVol', 1.5);
   int get relVolBaselineDays => _i('relVolBaselineDays', 10);
