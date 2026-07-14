@@ -112,6 +112,52 @@ class OrbExecutedTrade {
       this.mfeBar, this.maeBar, this.barsHeld, this.breakoutIdx, this.pathFA);
 }
 
+/// One stock's live opening-range setup (mirror of [OrbSetup] built from
+/// live data at 09:45). Mutable watch-state for the LTP loop.
+class OrbLiveSetup {
+  final int secId;
+  final String symbol;
+  final double rangeHigh;
+  final double rangeLow;
+  final double rangePct;
+  final double rangeVol;
+  final double relVol;
+  final double dayOpen;
+  final double rangeClosePos; // direction-agnostic (toward high)
+  final double rangeDrift;
+  final double atrPct;
+  final double avgDailyVol20;
+  final double prevClose;
+  final double pdh; // prior day high/low (parity fields)
+  final double pdl;
+  final bool aboveSma20;
+  final int indexTier;
+
+  bool done = false; // one breakout attempt per stock-day (same as backtest)
+  bool seenBelowHigh = false; // LTP observed below range high → later cross fills AT the level
+  bool seenAboveLow = false; // mirror for the short side (tape counting only)
+
+  OrbLiveSetup({
+    required this.secId,
+    required this.symbol,
+    required this.rangeHigh,
+    required this.rangeLow,
+    required this.rangePct,
+    required this.rangeVol,
+    required this.relVol,
+    required this.dayOpen,
+    required this.rangeClosePos,
+    required this.rangeDrift,
+    required this.atrPct,
+    required this.avgDailyVol20,
+    required this.prevClose,
+    required this.pdh,
+    required this.pdl,
+    required this.aboveSma20,
+    required this.indexTier,
+  });
+}
+
 /// Opening Range Breakout — RESEARCH build (backtest-only Phase 1).
 ///
 /// The one intraday strategy with a transparent multi-year Indian backtest
@@ -1738,13 +1784,592 @@ class OrbStrategy extends BaseStrategy {
   // Custom engine: Live / Paper — Phase 2 (after the edge passes IS + OOS)
   // ════════════════════════════════════════════════════════════════════════
 
+  /// Live/paper session — bar-faithful to the backtest:
+  ///   prep (dailies + RVOL baselines from cache) → 09:45 range lock from
+  ///   real 5-min candles → LTP watch loop (breakout detection + live tape +
+  ///   the exact gate chain) → paper entries → stop/15:20 exit monitoring →
+  ///   realized −2R daily stop. Every event mirrors the backtest's record
+  ///   shapes (Trigger/Trade/Reject) plus live-only parity fields
+  ///   (ltpAtDetect, slippage) so the evening same-day-backtest diff can
+  ///   reconcile trade-for-trade.
   @override
   Future<void> runLive(LiveEngineContext ctx) async {
-    ctx.log('ORB is Phase 1 (backtest research only) — the live/paper session '
-        'is not implemented yet. Run it from the Backtest screen instead.');
-    ctx.sendUpdate('update', {
-      'status': 'stopped',
-      'message': 'ORB: backtest-only research build — no live session yet.',
+    final p = OrbParams(ctx.params);
+    if (!ctx.isPaperTrading) {
+      // Real-money orders are deliberately not wired yet (exit legs need
+      // SELL support). Run the session in paper mode regardless — safety.
+      ctx.log('ORB live: REAL orders not supported yet — running as PAPER.');
+    }
+    final today = DateTime.now();
+    final dateStr = _fmt(today);
+
+    // ── Phase A: pre-market prep ────────────────────────────────────────
+    ctx.log('ORB prep: daily candles (ATR/trend/tilts) for ${ctx.securityIds.length} stocks...');
+    final dailyData = await CandleRepository.instance.bulkFetchDaily(
+      securityIds: ctx.securityIds,
+      fromDate: today.subtract(const Duration(days: 95)),
+      toDate: today,
+      accessToken: ctx.accessToken,
+      clientId: ctx.clientId,
+      onProgress: (c, t, s) {
+        if (c % 50 == 0 || c == t) {
+          ctx.sendUpdate('update', {
+            'status': 'running',
+            'message': 'Daily candles $c/$t',
+            'progress': (c * 100 / t).toInt(),
+          });
+        }
+      },
+      isCancelled: () => ctx.stopRequested,
+    );
+    if (ctx.stopRequested) return;
+    final dayMidnight = DateTime(today.year, today.month, today.day);
+    final dailyBefore = <int, List<Candle>>{};
+    for (final e in dailyData.entries) {
+      final before = e.value.where((c) => c.date.isBefore(dayMidnight)).toList();
+      if (before.isNotEmpty) dailyBefore[e.key] = before;
+    }
+    ctx.log('ORB prep: dailies ready for ${dailyBefore.length} stocks. '
+        'Building RVOL baselines (opening-window volume, prior ${p.relVolBaselineDays} days)...');
+
+    // RVOL baseline: same opening window on prior days, from the shared
+    // candle cache (mostly warm from the backtests; misses hit the API
+    // through the global rate limiter).
+    final rangeEndMin = 9 * 60 + 15 + p.rangeMinutes;
+    final rangeBarsWanted = p.rangeMinutes ~/ 5;
+    final baseline = <int, double>{}; // avg opening-window volume
+    int done = 0;
+    for (final secId in ctx.securityIds) {
+      if (ctx.stopRequested) return;
+      done++;
+      double sum = 0;
+      int days = 0, back = 0;
+      while (days < p.relVolBaselineDays && back < 21) {
+        back++;
+        final d = today.subtract(Duration(days: back));
+        if (d.weekday == DateTime.saturday || d.weekday == DateTime.sunday) {
+          continue;
+        }
+        try {
+          final bars = await CandleRepository.instance.getCandles(
+            securityId: secId,
+            date: d,
+            interval: '5',
+            accessToken: ctx.accessToken,
+            clientId: ctx.clientId,
+          );
+          double v = 0;
+          int n = 0;
+          for (final c in bars) {
+            final m = c.date.hour * 60 + c.date.minute;
+            if (m < rangeEndMin) {
+              v += c.volume;
+              n++;
+            } else {
+              break;
+            }
+          }
+          if (n == rangeBarsWanted && v > 0) {
+            sum += v;
+            days++;
+          }
+        } catch (_) {}
+      }
+      if (days >= p.minBaselineDays) baseline[secId] = sum / days;
+      if (done % 50 == 0 || done == ctx.securityIds.length) {
+        ctx.sendUpdate('update', {
+          'status': 'running',
+          'message': 'RVOL baselines $done/${ctx.securityIds.length}',
+          'progress': (done * 100 / ctx.securityIds.length).toInt(),
+        });
+      }
+    }
+    ctx.log('ORB prep complete: baselines for ${baseline.length} stocks.');
+    ctx.addKeyEvent('ORB pre-market ready: ${baseline.length} stocks');
+
+    // ── Phase B: 09:45 range lock ───────────────────────────────────────
+    final rangeLockAt = DateTime(today.year, today.month, today.day, 9, 15)
+        .add(Duration(minutes: p.rangeMinutes, seconds: 10));
+    while (DateTime.now().isBefore(rangeLockAt)) {
+      if (ctx.stopRequested) return;
+      ctx.sendUpdate('update', {
+        'status': 'running',
+        'message':
+            'Waiting for the opening range (locks ${_hm(rangeLockAt)})...',
+      });
+      await Future.delayed(const Duration(seconds: 5));
+    }
+
+    ctx.log('ORB: locking opening ranges...');
+    final setups = <OrbLiveSetup>[];
+    final dayRejects = <String, int>{};
+    void reject(String stage) =>
+        dayRejects[stage] = (dayRejects[stage] ?? 0) + 1;
+    done = 0;
+    for (final secId in ctx.securityIds) {
+      if (ctx.stopRequested) return;
+      done++;
+      if (done % 50 == 0 || done == ctx.securityIds.length) {
+        ctx.sendUpdate('update', {
+          'status': 'running',
+          'message': 'Locking ranges $done/${ctx.securityIds.length}',
+          'progress': (done * 100 / ctx.securityIds.length).toInt(),
+        });
+      }
+      final db = dailyBefore[secId];
+      if (db == null) {
+        reject('no_daily');
+        continue;
+      }
+      final base = baseline[secId];
+      if (base == null) {
+        reject('no_baseline');
+        continue;
+      }
+      List<Candle> bars;
+      try {
+        bars = await ctx.fetchIntraday(secId, '5', date: today);
+      } catch (_) {
+        reject('no_open_bar');
+        continue;
+      }
+      if (bars.isEmpty) {
+        reject('no_open_bar');
+        continue;
+      }
+      bars.sort((a, b) => a.date.compareTo(b.date));
+      final first = bars.first;
+      if (first.date.hour != 9 || first.date.minute != 15) {
+        reject('no_open_bar');
+        continue;
+      }
+      double rangeHigh = 0, rangeLow = double.infinity, rangeVol = 0;
+      int inRange = 0;
+      Candle? lastRangeBar;
+      for (final c in bars) {
+        final m = c.date.hour * 60 + c.date.minute;
+        if (m < rangeEndMin) {
+          if (c.high > rangeHigh) rangeHigh = c.high;
+          if (c.low < rangeLow) rangeLow = c.low;
+          rangeVol += c.volume;
+          inRange++;
+          lastRangeBar = c;
+        }
+      }
+      if (inRange != rangeBarsWanted || lastRangeBar == null) {
+        reject('range_data_hole');
+        continue;
+      }
+      final relVol = rangeVol / base;
+      final rangeMid = (rangeHigh + rangeLow) / 2;
+      final rangePct =
+          rangeMid > 0 ? (rangeHigh - rangeLow) / rangeMid * 100 : 0.0;
+      if (p.minRelVol > 0 && relVol < p.minRelVol) {
+        reject('rel_vol');
+        continue;
+      }
+      final span = rangeHigh - rangeLow;
+      final prevClose = db.last.close;
+      final scrip = ctx.scripService.findById(secId);
+      final symbol = scrip?.symbol ?? secId.toString();
+      final tf = _trendFeatures(db, first.open);
+      setups.add(OrbLiveSetup(
+        secId: secId,
+        symbol: symbol,
+        rangeHigh: rangeHigh,
+        rangeLow: rangeLow,
+        rangePct: rangePct,
+        rangeVol: rangeVol,
+        relVol: relVol,
+        dayOpen: first.open,
+        rangeClosePos: span > 0 ? (lastRangeBar.close - rangeLow) / span : 0.5,
+        rangeDrift: span > 0 ? (lastRangeBar.close - first.open) / span : 0.0,
+        atrPct: prevClose > 0 ? _atr14(db) / prevClose * 100 : 0.0,
+        avgDailyVol20: _avgDailyVolume(db, 20),
+        prevClose: prevClose,
+        pdh: db.last.high,
+        pdl: db.last.low,
+        aboveSma20: tf['aboveSma20'] == true,
+        indexTier: NiftyTiers.tier(symbol),
+      ));
+    }
+    ctx.recordActiveStocks(setups.length);
+    ctx.log('ORB: ${setups.length} stocks in play (relVol ≥ ${p.minRelVol}). '
+        'Watching for breakouts... rejects so far: $dayRejects');
+    ctx.addKeyEvent('ORB ranges locked: ${setups.length} in play');
+    ctx.runLogInfo('DaySummary', 'ORB live ranges locked', {
+      'date': dateStr,
+      'inPlay': setups.length,
+      'rejects': dayRejects,
+    });
+
+    // ── Phase C: LTP watch loop (entries + exits in one cycle) ──────────
+    final lastEntryAt = DateTime(
+        today.year, today.month, today.day, p.lastEntryHour, p.lastEntryMin);
+    final hardExitAt = DateTime(
+        today.year, today.month, today.day, p.hardExitHour, p.hardExitMin);
+    final liveTrades = <StrategyTradeModel>[];
+    int tapeL = 0, tapeS = 0;
+
+    void closeTrade(StrategyTradeModel t, double px, TradeOutcome outcome,
+        String kind, double? ltpSeen) {
+      t.status = TradeStatus.closed;
+      t.exitPrice = px;
+      t.exitTime = DateTime.now();
+      t.outcome = outcome;
+      ctx.log('EXIT[$kind]: ${t.symbol} @ ${px.toStringAsFixed(2)} P&L=₹${t.pnl.toStringAsFixed(0)}');
+      ctx.addKeyEvent('EXIT ${t.symbol} $kind ₹${t.pnl.toStringAsFixed(0)}');
+      ctx.runLogInfo('LiveExit', 'EXIT ${t.symbol} $kind @ ${px.toStringAsFixed(2)}', {
+        'date': dateStr,
+        'symbol': t.symbol,
+        'securityId': t.securityId,
+        'entryTime': _hm(t.entryTime ?? DateTime.now()),
+        'exitTime': _hm(t.exitTime!),
+        'exitKind': kind,
+        'entryPrice': t.entryPrice,
+        'exitPrice': px,
+        'qty': t.quantity,
+        'pnl': double.parse(t.pnl.toStringAsFixed(2)),
+        // Real-slippage measurement: the market price observed at exit
+        // decision time vs the booked exit level.
+        'ltpAtExit': ltpSeen,
+        'exitSlippagePct': (ltpSeen != null && px > 0)
+            ? double.parse(((ltpSeen - px) / px * 100).toStringAsFixed(4))
+            : null,
+      });
+      ctx.sendUpdate('trade_update', {
+        'type': outcome == TradeOutcome.stopLoss ? 'sl_hit' : 'eod_exit',
+        'symbol': t.symbol,
+        'securityId': t.securityId,
+        'entryPrice': t.entryPrice,
+        'exitPrice': px,
+        'quantity': t.quantity,
+        'pnl': t.pnl,
+        'outcome': t.outcome.name,
+        'isPaper': true,
+      });
+    }
+
+    ctx.log('ORB watch loop armed: entries until ${_hm(lastEntryAt)}, '
+        'square-off ${_hm(hardExitAt)}.');
+
+    // Late-start guard: if the session begins well after the range locked,
+    // stocks ALREADY beyond their level broke while we weren't watching —
+    // the backtest entered at the level long ago; chasing at current LTP
+    // would be a different (worse) trade. Mark them missed instead.
+    final startedLate =
+        DateTime.now().isAfter(rangeLockAt.add(const Duration(minutes: 10)));
+    var lateStartPurged = !startedLate;
+
+    while (!ctx.stopRequested && DateTime.now().isBefore(hardExitAt)) {
+      final now = DateTime.now();
+      final entriesOpen = now.isBefore(lastEntryAt);
+      final watchIds = <int>[
+        if (entriesOpen)
+          ...setups.where((s) => !s.done).map((s) => s.secId),
+        ...liveTrades
+            .where((t) => t.status == TradeStatus.open)
+            .map((t) => t.securityId),
+      ];
+      if (watchIds.isEmpty) {
+        if (!entriesOpen) break; // nothing open, no more entries → done
+        await Future.delayed(const Duration(seconds: 3));
+        continue;
+      }
+      Map<int, double> ltpMap;
+      try {
+        ltpMap = await ctx.fetchLtpBatch(watchIds.toSet().toList());
+      } catch (e) {
+        ctx.log('ORB LTP poll error: $e');
+        await Future.delayed(const Duration(seconds: 2));
+        continue;
+      }
+
+      // 0. Late-start purge (first successful poll only): anything already
+      // beyond its level broke unobserved — missed, not chased.
+      if (!lateStartPurged) {
+        lateStartPurged = true;
+        for (final s in setups.where((s) => !s.done)) {
+          final ltp = ltpMap[s.secId];
+          if (ltp == null || ltp <= 0) continue;
+          if (ltp > s.rangeHigh || ltp < s.rangeLow) {
+            s.done = true;
+            if (ltp > s.rangeHigh) {
+              tapeL++;
+            } else {
+              tapeS++;
+            }
+            ctx.runLogInfo('Reject',
+                '[$dateStr] ${s.symbol} late_start_missed: LTP $ltp already beyond range at session start',
+                {'date': dateStr, 'symbol': s.symbol, 'stage': 'late_start_missed', 'ltp': ltp});
+          }
+        }
+        ctx.log('Late start: purged already-broken setups (tape seeded L/S=$tapeL/$tapeS).');
+      }
+
+      // 1. Exits first (a position is protected before new risk is added).
+      for (final t
+          in liveTrades.where((t) => t.status == TradeStatus.open).toList()) {
+        final ltp = ltpMap[t.securityId];
+        if (ltp == null || ltp <= 0) continue;
+        if (ltp <= t.stopLoss) {
+          closeTrade(t, t.stopLoss, TradeOutcome.stopLoss, 'stop', ltp);
+        }
+      }
+
+      // 2. Breakout detection on the remaining watch list.
+      if (entriesOpen) {
+        final nowMin = now.hour * 60 + now.minute;
+        final barIdx = ((nowMin - (9 * 60 + 15)) / 5).floor();
+        final delayBars = barIdx - rangeBarsWanted;
+        for (final s in setups.where((s) => !s.done)) {
+          final ltp = ltpMap[s.secId];
+          if (ltp == null || ltp <= 0) continue;
+          if (ltp < s.rangeHigh) s.seenBelowHigh = true;
+          if (ltp > s.rangeLow) s.seenAboveLow = true;
+
+          // Short-side break: counts on the tape, never traded (longs-only);
+          // one line of parity logging, then the stock is done for the day.
+          if (ltp < s.rangeLow) {
+            s.done = true;
+            tapeS++;
+            ctx.runLogInfo('Reject',
+                '[$dateStr] ${s.symbol} short_disabled (live): LTP $ltp broke range low ${s.rangeLow}',
+                {'date': dateStr, 'symbol': s.symbol, 'stage': 'short_disabled', 'ltp': ltp});
+            continue;
+          }
+          if (ltp <= s.rangeHigh) continue;
+
+          // ── LONG breakout detected ──
+          s.done = true;
+          final tapeBefore = tapeL + tapeS;
+          tapeL++;
+          ctx.recordSignal();
+          // Fill semantics identical to a resting stop order (and to the
+          // backtest): crossed up through the level → fill AT the level;
+          // first sight already above → gapped, fill at LTP.
+          final fill = s.seenBelowHigh ? s.rangeHigh : ltp;
+          final slippagePct =
+              s.rangeHigh > 0 ? (ltp - s.rangeHigh) / s.rangeHigh * 100 : 0.0;
+
+          // Gate chain — same order and stages as the backtest pass 2c.
+          String? gated;
+          int touches = 0, opp = 0;
+          if (p.minAtrPct > 0 && s.atrPct < p.minAtrPct) {
+            gated = 'atr_band';
+          } else if (p.maxAtrPct > 0 && s.atrPct > p.maxAtrPct) {
+            gated = 'atr_band';
+          } else if (p.minBreakoutDelayBars > 0 &&
+              delayBars < p.minBreakoutDelayBars) {
+            gated = 'instant_break';
+          } else if (p.minDayMovePct > 0 && s.dayOpen > 0 &&
+              ((fill - s.dayOpen) / s.dayOpen * 100).abs() < p.minDayMovePct) {
+            gated = 'no_momentum';
+          } else if (p.minCoilPos > 0 && s.rangeClosePos < p.minCoilPos) {
+            gated = 'far_side_break';
+          }
+          if (gated == null && p.maxOppTouches >= 0) {
+            // Level-test texture from COMPLETED bars — one intraday fetch
+            // for this stock only, exactly the backtest definition.
+            try {
+              final bars = await ctx.fetchIntraday(s.secId, '5', date: today);
+              bars.sort((a, b) => a.date.compareTo(b.date));
+              for (final c in bars) {
+                final m = c.date.hour * 60 + c.date.minute;
+                if (m < rangeEndMin || m >= nowMin - (nowMin % 5)) continue;
+                if (c.high >= s.rangeHigh * 0.999) touches++;
+                if (c.low <= s.rangeLow * 1.001) opp++;
+              }
+              if (opp > p.maxOppTouches) gated = 'whipsaw_bar';
+            } catch (_) {}
+          }
+          if (gated == null && p.minTapeTotal > 0 &&
+              tapeBefore < p.minTapeTotal) {
+            gated = 'tape_quiet';
+          }
+          if (gated == null && p.requireTiltCount > 0) {
+            int tilts = 0;
+            if (fill < 100) tilts++;
+            if (s.rangePct >= 3.5 && s.rangePct < 5) tilts++;
+            if (!s.aboveSma20) tilts++;
+            if (tilts < p.requireTiltCount) gated = 'no_tilt';
+          }
+          double realizedR = 0;
+          if (gated == null && p.dailyStopR > 0) {
+            for (final t in liveTrades) {
+              if (t.status == TradeStatus.closed) {
+                realizedR += t.pnl / p.riskPerTrade;
+              }
+            }
+            if (realizedR <= -p.dailyStopR) gated = 'daily_stop';
+          }
+
+          if (gated != null) {
+            ctx.runLogInfo('Reject',
+                '[$dateStr] ${s.symbol} $gated (live breakout skipped)',
+                {
+                  'date': dateStr,
+                  'symbol': s.symbol,
+                  'stage': gated,
+                  'ltpAtDetect': ltp,
+                  'relVol': double.parse(s.relVol.toStringAsFixed(2)),
+                  'rangePct': double.parse(s.rangePct.toStringAsFixed(3)),
+                  'delayBars': delayBars,
+                  'tapeBefore': tapeBefore,
+                });
+            continue;
+          }
+
+          // ── Size + enter (paper) ──
+          final stopLoss =
+              fill - p.stopRangeFrac * (fill - s.rangeLow);
+          final risk = fill - stopLoss;
+          if (risk <= 0) continue;
+          final quantity = (p.riskPerTrade / risk).floor();
+          if (quantity <= 0) {
+            ctx.runLogInfo('Reject', '[$dateStr] ${s.symbol} qty_zero (live)',
+                {'date': dateStr, 'symbol': s.symbol, 'stage': 'qty_zero'});
+            continue;
+          }
+          final capital = quantity * fill;
+          if (p.maxCapitalPerTrade > 0 && capital > p.maxCapitalPerTrade) {
+            ctx.runLogInfo('Reject',
+                '[$dateStr] ${s.symbol} skipped_capital (live): ₹${capital.toStringAsFixed(0)}',
+                {'date': dateStr, 'symbol': s.symbol, 'stage': 'skipped_capital'});
+            continue;
+          }
+          final openAtEntry =
+              liveTrades.where((t) => t.status == TradeStatus.open).length;
+          final trade = StrategyTradeModel(
+            id: DateTime.now().millisecondsSinceEpoch.toString(),
+            strategyConfigId: ctx.configId,
+            signalId: 'orb_${s.secId}',
+            securityId: s.secId,
+            symbol: s.symbol,
+            status: TradeStatus.open,
+            isPaperTrade: true,
+            entryPrice: fill,
+            quantity: quantity,
+            entryTime: DateTime.now(),
+            stopLoss: stopLoss,
+            target: 0,
+            costModelPct: p.costModelRoundTripPct,
+          );
+          liveTrades.add(trade);
+          ctx.recordTrade(trade);
+          ctx.log('TRADE: ${s.symbol} Qty=$quantity Entry=${fill.toStringAsFixed(2)} '
+              'SL=${stopLoss.toStringAsFixed(2)} relVol=${s.relVol.toStringAsFixed(1)}x '
+              'tape=$tapeBefore slip=${slippagePct.toStringAsFixed(3)}%');
+          ctx.addKeyEvent('TRADE ${s.symbol} @ ${fill.toStringAsFixed(2)}');
+          // Full parity Trade record — backtest field names + live extras.
+          int tilts = 0;
+          if (fill < 100) tilts++;
+          if (s.rangePct >= 3.5 && s.rangePct < 5) tilts++;
+          if (!s.aboveSma20) tilts++;
+          ctx.runLogInfo('Trade', 'LIVE ENTRY ${s.symbol} $dateStr', {
+            'date': dateStr,
+            'symbol': s.symbol,
+            'securityId': s.secId,
+            'direction': 'L',
+            'rangeHigh': s.rangeHigh,
+            'rangeLow': s.rangeLow,
+            'rangePct': double.parse(s.rangePct.toStringAsFixed(3)),
+            'relVol': double.parse(s.relVol.toStringAsFixed(2)),
+            'gapPct': s.prevClose > 0
+                ? double.parse(((s.dayOpen - s.prevClose) / s.prevClose * 100)
+                    .toStringAsFixed(3))
+                : 0,
+            'atrPct': double.parse(s.atrPct.toStringAsFixed(3)),
+            'avgDailyVol': double.parse(s.avgDailyVol20.toStringAsFixed(0)),
+            'indexTier': s.indexTier,
+            'rangeClosePos': double.parse(s.rangeClosePos.toStringAsFixed(2)),
+            'rangeDrift': double.parse(s.rangeDrift.toStringAsFixed(2)),
+            'dayMovePct': s.dayOpen > 0
+                ? double.parse(
+                    ((fill - s.dayOpen) / s.dayOpen * 100).toStringAsFixed(3))
+                : 0,
+            'tiltCount': tilts,
+            // Tape strictly before this breakout (tapeL was just incremented
+            // for this very breakout — subtract it back, same as backtest).
+            'tapeL': tapeL - 1,
+            'tapeS': tapeS,
+            'touchesBeforeBreak': touches,
+            'oppTouches': opp,
+            'breakoutDelayBars': delayBars,
+            'entryTime': _hm(trade.entryTime!),
+            'entryPrice': fill,
+            'qty': quantity,
+            'stopLoss': stopLoss,
+            'realizedAtEntry': double.parse(realizedR.toStringAsFixed(2)),
+            'pdhDistPct': s.pdh > 0
+                ? double.parse(
+                    ((fill - s.pdh) / s.pdh * 100).toStringAsFixed(3))
+                : 0,
+            'pdlDistPct': s.pdl > 0
+                ? double.parse(
+                    ((fill - s.pdl) / s.pdl * 100).toStringAsFixed(3))
+                : 0,
+            'dow': today.weekday,
+            'tradeSeq': liveTrades.length, // this trade was just appended
+            'openAtEntry': openAtEntry,
+            // Live-only parity fields:
+            'ltpAtDetect': ltp,
+            'entrySlippagePct': double.parse(slippagePct.toStringAsFixed(4)),
+          });
+          ctx.sendUpdate('trade_update', {
+            'type': 'entry',
+            'symbol': s.symbol,
+            'securityId': s.secId,
+            'entryPrice': fill,
+            'quantity': quantity,
+            'stopLoss': stopLoss,
+            'target': 0,
+            'isPaper': true,
+          });
+        }
+      }
+      await Future.delayed(const Duration(seconds: 3));
+    }
+
+    // ── Square-off at 15:20 (or on stop request) ────────────────────────
+    final remaining =
+        liveTrades.where((t) => t.status == TradeStatus.open).toList();
+    if (remaining.isNotEmpty) {
+      ctx.log('ORB square-off: closing ${remaining.length} position(s)');
+      Map<int, double> ltpMap = const {};
+      try {
+        ltpMap =
+            await ctx.fetchLtpBatch(remaining.map((t) => t.securityId).toList());
+      } catch (_) {}
+      for (final t in remaining) {
+        final ltp = ltpMap[t.securityId];
+        closeTrade(t, (ltp != null && ltp > 0) ? ltp : t.entryPrice,
+            TradeOutcome.endOfDay, 'time', ltp);
+      }
+    }
+
+    // End-of-day parity sweep: every in-play stock that never broke out gets
+    // its one Reject line, so the evening backtest diff explains every gap.
+    int swept = 0;
+    for (final s in setups.where((s) => !s.done)) {
+      ctx.runLogInfo('Reject', '[$dateStr] ${s.symbol} no_breakout (live)',
+          {'date': dateStr, 'symbol': s.symbol, 'stage': 'no_breakout'});
+      swept++;
+    }
+    final dayPnl =
+        liveTrades.fold<double>(0, (a, t) => a + t.pnl);
+    ctx.log('ORB session done. Trades=${liveTrades.length} '
+        'P&L=₹${dayPnl.toStringAsFixed(0)} tape L/S=$tapeL/$tapeS '
+        'no-breakout sweeps=$swept');
+    ctx.addKeyEvent('ORB day done: ${liveTrades.length} trades, ₹${dayPnl.toStringAsFixed(0)}');
+    ctx.runLogInfo('DaySummary', 'ORB live day complete', {
+      'date': dateStr,
+      'trades': liveTrades.length,
+      'pnl': double.parse(dayPnl.toStringAsFixed(0)),
+      'tapeL': tapeL,
+      'tapeS': tapeS,
+      'inPlay': setups.length,
+      'rejects': dayRejects,
     });
   }
 
