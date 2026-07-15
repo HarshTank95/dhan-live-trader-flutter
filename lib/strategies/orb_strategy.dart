@@ -836,6 +836,10 @@ class OrbStrategy extends BaseStrategy {
         return 'Short breakout skipped (tradeLongsOnly) — still tape-counted and Shadow-logged.';
       case 'no_tilt':
         return 'Qualifying breakout without any conviction tilt (price<100 / range 3.5-5% / below SMA20) — Option-C concentration skips it; Shadow tracks what it would have done.';
+      case 'lock_window_missed':
+        return 'Broke out in a bar that closed while ranges were still locking — counted on the tape, not chased (live only).';
+      case 'late_start_missed':
+        return 'Already beyond its range when the live session started — counted on the tape, not chased (live only).';
       case 'skipped_capital':
         return 'Trade notional above maxCapitalPerTrade.';
       case 'gap_band':
@@ -1905,6 +1909,13 @@ class OrbStrategy extends BaseStrategy {
     final dayRejects = <String, int>{};
     void reject(String stage) =>
         dayRejects[stage] = (dayRejects[stage] ?? 0) + 1;
+    // Tape seeds: breakouts that already happened in CLOSED post-range bars
+    // while ranges were locking. Counted with the backtest's exact bar
+    // semantics so the live activity floor starts from the right number
+    // (day-1 recon: live tape lagged the backtest all morning and gated a
+    // trade the backtest took — this closes that gap). Both-sides bars are
+    // NOT counted (the backtest drops them before the tape too).
+    int seedTapeL = 0, seedTapeS = 0;
     done = 0;
     for (final secId in ctx.securityIds) {
       if (ctx.stopRequested) return;
@@ -1973,7 +1984,7 @@ class OrbStrategy extends BaseStrategy {
       final scrip = ctx.scripService.findById(secId);
       final symbol = scrip?.symbol ?? secId.toString();
       final tf = _trendFeatures(db, first.open);
-      setups.add(OrbLiveSetup(
+      final setup = OrbLiveSetup(
         secId: secId,
         symbol: symbol,
         rangeHigh: rangeHigh,
@@ -1991,7 +2002,45 @@ class OrbStrategy extends BaseStrategy {
         pdl: db.last.low,
         aboveSma20: tf['aboveSma20'] == true,
         indexTier: NiftyTiers.tier(symbol),
-      ));
+      );
+      setups.add(setup);
+
+      // Seed scan: first breakout among post-range bars that CLOSED while we
+      // were locking (bar start m needs m+5 minutes to have elapsed). Same
+      // rules as the backtest's _findBreakout, break/skip on first event.
+      final nowMin2 = DateTime.now().hour * 60 + DateTime.now().minute;
+      for (final c in bars) {
+        final m = c.date.hour * 60 + c.date.minute;
+        if (m < rangeEndMin || m + 5 > nowMin2) continue; // in-range or forming
+        final longHit = c.high > setup.rangeHigh;
+        final shortHit = c.low < setup.rangeLow;
+        if (longHit && shortHit) {
+          // Direction-unknowable bar: backtest drops it BEFORE the tape.
+          setup.done = true;
+          ctx.runLogInfo('Reject',
+              '[$dateStr] $symbol both_sides_same_bar (lock window)',
+              {'date': dateStr, 'symbol': symbol, 'stage': 'both_sides_same_bar'});
+          break;
+        }
+        if (longHit || shortHit) {
+          setup.done = true;
+          if (longHit) {
+            seedTapeL++;
+          } else {
+            seedTapeS++;
+          }
+          ctx.runLogInfo('Reject',
+              '[$dateStr] $symbol lock_window_missed: broke ${longHit ? "high" : "low"} in the ${_hm(c.date)} bar while ranges were locking',
+              {
+                'date': dateStr,
+                'symbol': symbol,
+                'stage': 'lock_window_missed',
+                'direction': longHit ? 'L' : 'S',
+                'barTime': _hm(c.date),
+              });
+          break;
+        }
+      }
     }
     ctx.recordActiveStocks(setups.length);
     ctx.log('ORB: ${setups.length} stocks in play (relVol ≥ ${p.minRelVol}). '
@@ -2009,7 +2058,10 @@ class OrbStrategy extends BaseStrategy {
     final hardExitAt = DateTime(
         today.year, today.month, today.day, p.hardExitHour, p.hardExitMin);
     final liveTrades = <StrategyTradeModel>[];
-    int tapeL = 0, tapeS = 0;
+    int tapeL = seedTapeL, tapeS = seedTapeS;
+    if (seedTapeL + seedTapeS > 0) {
+      ctx.log('ORB tape seeded from lock-window bars: L=$seedTapeL S=$seedTapeS');
+    }
 
     void closeTrade(StrategyTradeModel t, double px, TradeOutcome outcome,
         String kind, double? ltpSeen) {
