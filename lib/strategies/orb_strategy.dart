@@ -1838,17 +1838,22 @@ class OrbStrategy extends BaseStrategy {
 
     // RVOL baseline: same opening window on prior days, from the shared
     // candle cache (mostly warm from the backtests; misses hit the API
-    // through the global rate limiter).
+    // through the global rate limiter). RELIABILITY, not rules: a transient
+    // fetch failure must not silently shrink the universe (day-2 recon:
+    // 138 stocks lost to swallowed errors → live saw half the backtest's
+    // universe). One retry pass for failures + per-stock diagnostics.
     final rangeEndMin = 9 * 60 + 15 + p.rangeMinutes;
     final rangeBarsWanted = p.rangeMinutes ~/ 5;
     final baseline = <int, double>{}; // avg opening-window volume
-    int done = 0;
-    for (final secId in ctx.securityIds) {
-      if (ctx.stopRequested) return;
-      done++;
+    final baselineDaysFound = <int, int>{};
+    final baselineErrors = <int, int>{};
+
+    Future<void> buildBaseline(int secId) async {
       double sum = 0;
-      int days = 0, back = 0;
-      while (days < p.relVolBaselineDays && back < 21) {
+      int days = 0, back = 0, errors = 0;
+      // Walk back up to 30 calendar days (~21 trading days) so a few
+      // missing/holiday days can't sink a stock's baseline.
+      while (days < p.relVolBaselineDays && back < 30) {
         back++;
         final d = today.subtract(Duration(days: back));
         if (d.weekday == DateTime.saturday || d.weekday == DateTime.sunday) {
@@ -1877,9 +1882,20 @@ class OrbStrategy extends BaseStrategy {
             sum += v;
             days++;
           }
-        } catch (_) {}
+        } catch (_) {
+          errors++;
+        }
       }
+      baselineDaysFound[secId] = days;
+      baselineErrors[secId] = (baselineErrors[secId] ?? 0) + errors;
       if (days >= p.minBaselineDays) baseline[secId] = sum / days;
+    }
+
+    int done = 0;
+    for (final secId in ctx.securityIds) {
+      if (ctx.stopRequested) return;
+      done++;
+      await buildBaseline(secId);
       if (done % 50 == 0 || done == ctx.securityIds.length) {
         ctx.sendUpdate('update', {
           'status': 'running',
@@ -1888,8 +1904,52 @@ class OrbStrategy extends BaseStrategy {
         });
       }
     }
-    ctx.log('ORB prep complete: baselines for ${baseline.length} stocks.');
-    ctx.addKeyEvent('ORB pre-market ready: ${baseline.length} stocks');
+
+    // Retry pass: stocks that failed usually failed on CONNECTIVITY, not
+    // data — a second sweep after the first (by which point the network has
+    // typically recovered and partial results are cached) rescues most.
+    final failed = ctx.securityIds
+        .where((id) => !baseline.containsKey(id))
+        .toList();
+    if (failed.isNotEmpty) {
+      ctx.log('ORB prep: retrying baselines for ${failed.length} stocks...');
+      done = 0;
+      for (final secId in failed) {
+        if (ctx.stopRequested) return;
+        done++;
+        await buildBaseline(secId);
+        if (done % 25 == 0 || done == failed.length) {
+          ctx.sendUpdate('update', {
+            'status': 'running',
+            'message': 'Baseline retry $done/${failed.length}',
+          });
+        }
+      }
+    }
+
+    // Prep health line + one diagnostic record per unrecovered stock, so a
+    // shrunken universe is loud and attributable (data vs connectivity).
+    final stillFailed = ctx.securityIds
+        .where((id) => !baseline.containsKey(id))
+        .toList();
+    final totalErrors =
+        baselineErrors.values.fold<int>(0, (a, b) => a + b);
+    ctx.log('ORB prep health: baselines ${baseline.length}/${ctx.securityIds.length} OK, '
+        '${stillFailed.length} failed, fetch errors: $totalErrors');
+    ctx.addKeyEvent('ORB pre-market ready: ${baseline.length}/${ctx.securityIds.length} baselines'
+        '${stillFailed.isNotEmpty ? " (${stillFailed.length} FAILED)" : ""}');
+    for (final secId in stillFailed) {
+      final scrip = ctx.scripService.findById(secId);
+      ctx.runLogInfo('Reject',
+          '[$dateStr] ${scrip?.symbol ?? secId} no_baseline: ${baselineDaysFound[secId] ?? 0}/${p.minBaselineDays} days, ${baselineErrors[secId] ?? 0} fetch errors',
+          {
+            'date': dateStr,
+            'symbol': scrip?.symbol ?? '$secId',
+            'stage': 'no_baseline',
+            'daysFound': baselineDaysFound[secId] ?? 0,
+            'fetchErrors': baselineErrors[secId] ?? 0,
+          });
+    }
 
     // ── Phase B: 09:45 range lock ───────────────────────────────────────
     final rangeLockAt = DateTime(today.year, today.month, today.day, 9, 15)
