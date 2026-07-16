@@ -1819,7 +1819,7 @@ class OrbStrategy extends BaseStrategy {
         if (c % 50 == 0 || c == t) {
           ctx.sendUpdate('update', {
             'status': 'running',
-            'message': 'Daily candles $c/$t',
+            'message': 'Prep 1/3 · daily data $c/$t',
             'progress': (c * 100 / t).toInt(),
           });
         }
@@ -1899,7 +1899,7 @@ class OrbStrategy extends BaseStrategy {
       if (done % 50 == 0 || done == ctx.securityIds.length) {
         ctx.sendUpdate('update', {
           'status': 'running',
-          'message': 'RVOL baselines $done/${ctx.securityIds.length}',
+          'message': 'Prep 2/3 · volume baselines $done/${ctx.securityIds.length}',
           'progress': (done * 100 / ctx.securityIds.length).toInt(),
         });
       }
@@ -1921,7 +1921,7 @@ class OrbStrategy extends BaseStrategy {
         if (done % 25 == 0 || done == failed.length) {
           ctx.sendUpdate('update', {
             'status': 'running',
-            'message': 'Baseline retry $done/${failed.length}',
+            'message': 'Prep 2/3 · retry $done/${failed.length}',
           });
         }
       }
@@ -1958,8 +1958,7 @@ class OrbStrategy extends BaseStrategy {
       if (ctx.stopRequested) return;
       ctx.sendUpdate('update', {
         'status': 'running',
-        'message':
-            'Waiting for the opening range (locks ${_hm(rangeLockAt)})...',
+        'message': 'Ready · range locks ${_hm(rangeLockAt)}',
       });
       await Future.delayed(const Duration(seconds: 5));
     }
@@ -1983,7 +1982,7 @@ class OrbStrategy extends BaseStrategy {
       if (done % 50 == 0 || done == ctx.securityIds.length) {
         ctx.sendUpdate('update', {
           'status': 'running',
-          'message': 'Locking ranges $done/${ctx.securityIds.length}',
+          'message': 'Prep 3/3 · locking ranges $done/${ctx.securityIds.length}',
           'progress': (done * 100 / ctx.securityIds.length).toInt(),
         });
       }
@@ -2172,6 +2171,25 @@ class OrbStrategy extends BaseStrategy {
     final startedLate =
         DateTime.now().isAfter(rangeLockAt.add(const Duration(minutes: 10)));
     var lateStartPurged = !startedLate;
+
+    // Dashboard heartbeat: one short status line, refreshed ~30s, so the
+    // screen actually monitors the day instead of showing stale prep text.
+    var lastBeat = DateTime.fromMillisecondsSinceEpoch(0);
+    void heartbeat() {
+      if (DateTime.now().difference(lastBeat).inSeconds < 30) return;
+      lastBeat = DateTime.now();
+      final open =
+          liveTrades.where((t) => t.status == TradeStatus.open).length;
+      final closedPnl = liveTrades.fold<double>(0, (a, t) => a + t.pnl);
+      final watching = setups.where((s) => !s.done).length;
+      final entriesOn = DateTime.now().isBefore(lastEntryAt);
+      ctx.sendUpdate('update', {
+        'status': 'running',
+        'message': 'Live · watch $watching · open $open · '
+            'done ${liveTrades.length - open} · ₹${closedPnl.toStringAsFixed(0)} · '
+            'tape ${tapeL + tapeS}${entriesOn ? "" : " · no new entries"}',
+      });
+    }
 
     while (!ctx.stopRequested && DateTime.now().isBefore(hardExitAt)) {
       final now = DateTime.now();
@@ -2440,6 +2458,7 @@ class OrbStrategy extends BaseStrategy {
           });
         }
       }
+      heartbeat();
       await Future.delayed(const Duration(seconds: 3));
     }
 
@@ -2470,6 +2489,11 @@ class OrbStrategy extends BaseStrategy {
     }
     final dayPnl =
         liveTrades.fold<double>(0, (a, t) => a + t.pnl);
+    ctx.sendUpdate('update', {
+      'status': 'running',
+      'message':
+          'Day done · ${liveTrades.length} trades · ₹${dayPnl.toStringAsFixed(0)}',
+    });
     ctx.log('ORB session done. Trades=${liveTrades.length} '
         'P&L=₹${dayPnl.toStringAsFixed(0)} tape L/S=$tapeL/$tapeS '
         'no-breakout sweeps=$swept');
