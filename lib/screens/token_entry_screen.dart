@@ -20,7 +20,8 @@ class TokenEntryScreen extends StatefulWidget {
 
 enum _AuthMode { paste, generate }
 
-class _TokenEntryScreenState extends State<TokenEntryScreen> {
+class _TokenEntryScreenState extends State<TokenEntryScreen>
+    with WidgetsBindingObserver {
   late final TextEditingController _clientIdController;
   late final TextEditingController _accessTokenController;
   final _pinController = TextEditingController();
@@ -28,6 +29,7 @@ class _TokenEntryScreenState extends State<TokenEntryScreen> {
 
   _AuthMode _mode = _AuthMode.paste;
   bool _generating = false;
+  String _lastAutoTotp = '';
 
   @override
   void initState() {
@@ -36,6 +38,33 @@ class _TokenEntryScreenState extends State<TokenEntryScreen> {
         TextEditingController(text: widget.initialClientId ?? '');
     _accessTokenController =
         TextEditingController(text: widget.initialAccessToken ?? '');
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  /// The whole TOTP dance used to be: switch to the authenticator, copy,
+  /// switch back, tap the field, long-press, paste. Now: when the app
+  /// RESUMES (i.e. you just came back from the authenticator) the clipboard
+  /// is checked — a 6-digit code auto-fills the field. One tap left:
+  /// Generate & Continue.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _tryAutoFillTotp();
+  }
+
+  Future<void> _tryAutoFillTotp({bool manual = false}) async {
+    if (!manual && _mode != _AuthMode.generate) return;
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text?.trim() ?? '';
+    final isCode = RegExp(r'^\d{6}$').hasMatch(text);
+    if (!isCode) {
+      if (manual) _snack('Clipboard has no 6-digit code', isError: true);
+      return;
+    }
+    if (!manual && text == _lastAutoTotp) return; // don't re-toast same code
+    _lastAutoTotp = text;
+    if (!mounted) return;
+    setState(() => _totpController.text = text);
+    _snack('TOTP pasted from clipboard ✓');
   }
 
   Future<void> _generate() async {
@@ -117,6 +146,7 @@ class _TokenEntryScreenState extends State<TokenEntryScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _clientIdController.dispose();
     _accessTokenController.dispose();
     _pinController.dispose();
@@ -238,17 +268,27 @@ class _TokenEntryScreenState extends State<TokenEntryScreen> {
       TextField(
         controller: _totpController,
         keyboardType: TextInputType.number,
-        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-        decoration: const InputDecoration(
+        inputFormatters: [
+          FilteringTextInputFormatter.digitsOnly,
+          LengthLimitingTextInputFormatter(6),
+        ],
+        decoration: InputDecoration(
           labelText: 'TOTP (from authenticator app)',
-          border: OutlineInputBorder(),
-          prefixIcon: Icon(Icons.timer_outlined),
+          border: const OutlineInputBorder(),
+          prefixIcon: const Icon(Icons.timer_outlined),
+          // One-tap fallback; the field also auto-fills whenever you come
+          // back from the authenticator with a code on the clipboard.
+          suffixIcon: IconButton(
+            tooltip: 'Paste code',
+            icon: const Icon(Icons.content_paste_go),
+            onPressed: () => _tryAutoFillTotp(manual: true),
+          ),
         ),
       ),
       const SizedBox(height: 8),
       const Text(
-        'Requires TOTP to be enabled on your Dhan account. '
-        'PIN and TOTP are used once and never stored.',
+        'Tip: copy the code in your authenticator and switch back — it '
+        'pastes itself. PIN and TOTP are used once and never stored.',
         style: TextStyle(color: Colors.grey, fontSize: 12),
       ),
       const SizedBox(height: 24),
