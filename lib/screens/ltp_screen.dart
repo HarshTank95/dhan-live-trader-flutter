@@ -432,13 +432,6 @@ class _LtpScreenState extends State<LtpScreen> {
             const SizedBox(height: 16),
             Row(
               children: [
-                CircleAvatar(
-                  backgroundColor: Colors.blue.shade100,
-                  child: Text(q.symbol[0],
-                      style: const TextStyle(
-                          color: Colors.blue, fontWeight: FontWeight.bold)),
-                ),
-                const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -453,8 +446,20 @@ class _LtpScreenState extends State<LtpScreen> {
                     ],
                   ),
                 ),
-                const Text('NSE',
-                    style: TextStyle(color: Colors.grey, fontSize: 12)),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text('NSE',
+                      style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.5,
+                          color: Colors.grey.shade500)),
+                ),
               ],
             ),
             const SizedBox(height: 20),
@@ -1428,24 +1433,44 @@ class _LtpScreenState extends State<LtpScreen> {
               final color = q.isPositive ? Colors.green : Colors.red;
               final arrow = q.isPositive ? '▲' : '▼';
 
+              // Broker-standard row (Kite/Dhan style): lead with the symbol
+              // itself + a small exchange tag — no letter avatars.
               return ListTile(
                 onTap: () => _showStockDetail(q),
                 contentPadding: const EdgeInsets.symmetric(
                     horizontal: 16, vertical: 10),
-                leading: CircleAvatar(
-                  backgroundColor: Colors.blue.shade100,
-                  child: Text(q.symbol[0],
-                      style: const TextStyle(
-                          color: Colors.blue,
-                          fontWeight: FontWeight.bold)),
+                title: Row(
+                  children: [
+                    Flexible(
+                      child: Text(q.symbol,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 16)),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 5, vertical: 1.5),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text('NSE',
+                          style: TextStyle(
+                              fontSize: 9,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.5,
+                              color: Colors.grey.shade500)),
+                    ),
+                  ],
                 ),
-                title: Text(q.symbol,
-                    style: const TextStyle(
-                        fontWeight: FontWeight.bold, fontSize: 16)),
-                subtitle: Text(q.name,
-                    style: const TextStyle(
-                        color: Colors.grey, fontSize: 11),
-                    overflow: TextOverflow.ellipsis),
+                subtitle: Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(q.name,
+                      style: const TextStyle(
+                          color: Colors.grey, fontSize: 11),
+                      overflow: TextOverflow.ellipsis),
+                ),
                 trailing: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.end,
@@ -1627,15 +1652,8 @@ class _StockSearchDelegate extends SearchDelegate<ScripInfo?> {
       itemBuilder: (context, index) {
         final scrip = results[index];
         return ListTile(
-          leading: CircleAvatar(
-            backgroundColor: _segmentColor(scrip.segment).withValues(alpha: 0.15),
-            child: Text(
-              scrip.underlying[0],
-              style: TextStyle(
-                  color: _segmentColor(scrip.segment),
-                  fontWeight: FontWeight.bold),
-            ),
-          ),
+          // No letter avatar — the segment badge in the title already
+          // carries the type; brokers lead with the symbol text itself.
           title: Row(
             children: [
               Flexible(
