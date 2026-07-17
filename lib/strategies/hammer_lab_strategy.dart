@@ -125,6 +125,12 @@ class HammerLabStrategy extends BaseStrategy {
   String get displayName => 'Hammer/Dominance — LAB (base-only research)';
 
   @override
+  String get shortDescription =>
+      'Research clone of S1: base hammer-at-support rule only, all learned '
+      'filters off, plain stop + 15:00 exit. For log mining, not live '
+      'trading.';
+
+  @override
   String get description =>
       'Research clone of S1 reduced to the base rule only: a hammer or green '
       'dominance candle at an Indian support level whose next candle breaks the '

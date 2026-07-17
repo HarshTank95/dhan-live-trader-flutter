@@ -215,23 +215,70 @@ class _StrategyListScreenState extends State<StrategyListScreen>
               // Scrollable list — won't overflow no matter how many strategies
               // or how long their descriptions get.
               Flexible(
-                child: ListView(
+                child: ListView.separated(
                   shrinkWrap: true,
-                  children: strategies
-                      .map((s) => ListTile(
-                            leading:
-                                const Icon(Icons.bolt, color: Colors.blue),
-                            title: Text(s.displayName,
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.w600)),
-                            subtitle: Text(s.description,
-                                style: const TextStyle(fontSize: 12)),
-                            onTap: () {
-                              Navigator.pop(context);
-                              _createForType(s);
-                            },
-                          ))
-                      .toList(),
+                  itemCount: strategies.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 10),
+                  itemBuilder: (_, i) {
+                    final s = strategies[i];
+                    return Material(
+                      color: Theme.of(context)
+                          .colorScheme
+                          .surfaceContainerHighest
+                          .withValues(alpha: 0.5),
+                      borderRadius: BorderRadius.circular(14),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(14),
+                        onTap: () {
+                          Navigator.pop(context);
+                          _createForType(s);
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.all(14),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.all(8),
+                                decoration: BoxDecoration(
+                                  color: Colors.blue.withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: const Icon(Icons.bolt,
+                                    color: Colors.blue, size: 20),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
+                                  children: [
+                                    Text(s.displayName,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w600)),
+                                    const SizedBox(height: 3),
+                                    Text(s.shortDescription,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                            fontSize: 12,
+                                            height: 1.3,
+                                            color: Colors.grey.shade500)),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Icon(Icons.chevron_right,
+                                  color: Colors.grey.shade600, size: 20),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
                 ),
               ),
             ],

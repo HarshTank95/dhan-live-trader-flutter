@@ -128,6 +128,11 @@ abstract class BaseStrategy {
   /// Short description
   String get description;
 
+  /// One-or-two-line blurb for pickers/cards. Defaults to [description];
+  /// strategies whose description doubles as research documentation
+  /// override this with something a human can scan in a second.
+  String get shortDescription => description;
+
   /// Default parameter values for this strategy
   Map<String, dynamic> get defaultParams;
 

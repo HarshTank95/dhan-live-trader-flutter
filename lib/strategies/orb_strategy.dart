@@ -191,6 +191,12 @@ class OrbStrategy extends BaseStrategy {
   String get displayName => 'Opening Range Breakout (research)';
 
   @override
+  String get shortDescription =>
+      'Validated 30-min opening-range breakout, longs only: coiled, '
+      'volume-backed breaks on active mornings. Half-range stop, hold to '
+      '15:20, −2R daily stop. ~2 trades/day.';
+
+  @override
   String get description =>
       'ORB on stocks with the mined STACK defaults: 30-min range, touch '
       'entry, LONGS ONLY (shorts tape-counted + shadow-logged), relVol ≥ '
