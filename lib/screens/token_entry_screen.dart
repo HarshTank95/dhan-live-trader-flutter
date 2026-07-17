@@ -27,7 +27,9 @@ class _TokenEntryScreenState extends State<TokenEntryScreen>
   final _pinController = TextEditingController();
   final _totpController = TextEditingController();
 
-  _AuthMode _mode = _AuthMode.paste;
+  // Generate-first: it's the everyday path (tokens expire daily); pasting a
+  // ready-made token is the fallback.
+  _AuthMode _mode = _AuthMode.generate;
   bool _generating = false;
   String _lastAutoTotp = '';
 
@@ -154,46 +156,121 @@ class _TokenEntryScreenState extends State<TokenEntryScreen>
     super.dispose();
   }
 
+  /// Rounded, filled field styling shared by every input on this screen.
+  InputDecoration _dec(String label, IconData icon,
+      {Widget? suffix, String? hint}) {
+    final cs = Theme.of(context).colorScheme;
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      prefixIcon: Icon(icon, size: 20),
+      suffixIcon: suffix,
+      filled: true,
+      fillColor: cs.surfaceContainerHighest.withValues(alpha: 0.45),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide.none,
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide(color: cs.primary, width: 1.5),
+      ),
+    );
+  }
+
+  ButtonStyle get _ctaStyle => FilledButton.styleFrom(
+        minimumSize: const Size.fromHeight(52),
+        backgroundColor: Colors.blue,
+        foregroundColor: Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+        ),
+        textStyle:
+            const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+      );
+
   @override
   Widget build(BuildContext context) {
     final isEditing = widget.initialClientId != null;
+    final cs = Theme.of(context).colorScheme;
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(isEditing ? 'Edit Credentials' : 'Dhan LTP Viewer'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        title: Text(isEditing ? 'Edit Credentials' : 'Connect to Dhan'),
+        backgroundColor: cs.inversePrimary,
       ),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24.0),
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const SizedBox(height: 16),
-            const Icon(Icons.show_chart, size: 64, color: Colors.blue),
+            const SizedBox(height: 12),
+            // Hero badge
+            Center(
+              child: Container(
+                width: 76,
+                height: 76,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Colors.blue.shade400,
+                      Colors.indigo.shade600,
+                    ],
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.blue.withValues(alpha: 0.35),
+                      blurRadius: 18,
+                      offset: const Offset(0, 6),
+                    ),
+                  ],
+                ),
+                child: const Icon(Icons.candlestick_chart,
+                    size: 38, color: Colors.white),
+              ),
+            ),
             const SizedBox(height: 16),
             Text(
-              isEditing ? 'Update Credentials' : 'Enter Dhan Credentials',
-              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              isEditing ? 'Refresh your session' : 'Welcome — let\'s connect',
+              style:
+                  const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
               textAlign: TextAlign.center,
             ),
-            const SizedBox(height: 8),
-            const Text(
-              'Your token is saved locally on this device',
-              style: TextStyle(color: Colors.grey),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
-            SegmentedButton<_AuthMode>(
-              segments: const [
-                ButtonSegment(
-                  value: _AuthMode.paste,
-                  label: Text('Paste token'),
-                  icon: Icon(Icons.key_outlined),
+            const SizedBox(height: 6),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.lock_outline,
+                    size: 13, color: Colors.grey.shade500),
+                const SizedBox(width: 4),
+                Text(
+                  'Credentials never leave this device',
+                  style:
+                      TextStyle(color: Colors.grey.shade500, fontSize: 12.5),
                 ),
+              ],
+            ),
+            const SizedBox(height: 22),
+            // Generate first — it's the daily-driver path.
+            SegmentedButton<_AuthMode>(
+              style: SegmentedButton.styleFrom(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              segments: const [
                 ButtonSegment(
                   value: _AuthMode.generate,
                   label: Text('Generate token'),
                   icon: Icon(Icons.bolt_outlined),
+                ),
+                ButtonSegment(
+                  value: _AuthMode.paste,
+                  label: Text('Paste token'),
+                  icon: Icon(Icons.key_outlined),
                 ),
               ],
               selected: {_mode},
@@ -201,20 +278,32 @@ class _TokenEntryScreenState extends State<TokenEntryScreen>
                   ? null
                   : (s) => setState(() => _mode = s.first),
             ),
-            const SizedBox(height: 24),
-            TextField(
-              controller: _clientIdController,
-              decoration: const InputDecoration(
-                labelText: 'Client ID',
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.person_outline),
+            const SizedBox(height: 20),
+            // Form card
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: cs.surfaceContainerHighest.withValues(alpha: 0.25),
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: cs.outlineVariant.withValues(alpha: 0.4),
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  TextField(
+                    controller: _clientIdController,
+                    decoration: _dec('Client ID', Icons.person_outline),
+                  ),
+                  const SizedBox(height: 14),
+                  if (_mode == _AuthMode.paste)
+                    ..._buildPasteFields()
+                  else
+                    ..._buildGenerateFields(),
+                ],
               ),
             ),
-            const SizedBox(height: 16),
-            if (_mode == _AuthMode.paste)
-              ..._buildPasteFields()
-            else
-              ..._buildGenerateFields(),
           ],
         ),
       ),
@@ -226,74 +315,78 @@ class _TokenEntryScreenState extends State<TokenEntryScreen>
     return [
       TextField(
         controller: _accessTokenController,
-        decoration: const InputDecoration(
-          labelText: 'Access Token',
-          border: OutlineInputBorder(),
-          prefixIcon: Icon(Icons.key_outlined),
-          alignLabelWithHint: true,
-        ),
         maxLines: 4,
+        style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
+        decoration: _dec('Access Token', Icons.key_outlined,
+            hint: 'Paste the token from web.dhan.co → My profile → DhanHQ'),
       ),
-      const SizedBox(height: 24),
-      ElevatedButton.icon(
+      const SizedBox(height: 20),
+      FilledButton.icon(
         onPressed: _proceed,
-        icon: Icon(isEditing ? Icons.save : Icons.play_arrow),
-        label: Text(
-          isEditing ? 'Save & Continue' : 'View Live Prices',
-          style: const TextStyle(fontSize: 16),
-        ),
-        style: ElevatedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(vertical: 14),
-          backgroundColor: Colors.blue,
-          foregroundColor: Colors.white,
-        ),
+        style: _ctaStyle,
+        icon: Icon(isEditing ? Icons.save_outlined : Icons.play_arrow),
+        label: Text(isEditing ? 'Save & Continue' : 'Start'),
       ),
     ];
   }
 
   List<Widget> _buildGenerateFields() {
+    final cs = Theme.of(context).colorScheme;
     return [
       TextField(
         controller: _pinController,
         keyboardType: TextInputType.number,
         obscureText: true,
         inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-        decoration: const InputDecoration(
-          labelText: 'Dhan PIN',
-          border: OutlineInputBorder(),
-          prefixIcon: Icon(Icons.lock_outline),
-        ),
+        decoration: _dec('Dhan PIN', Icons.lock_outline),
       ),
-      const SizedBox(height: 16),
+      const SizedBox(height: 14),
       TextField(
         controller: _totpController,
         keyboardType: TextInputType.number,
+        style: const TextStyle(
+            fontSize: 18, letterSpacing: 6, fontWeight: FontWeight.w600),
         inputFormatters: [
           FilteringTextInputFormatter.digitsOnly,
           LengthLimitingTextInputFormatter(6),
         ],
-        decoration: InputDecoration(
-          labelText: 'TOTP (from authenticator app)',
-          border: const OutlineInputBorder(),
-          prefixIcon: const Icon(Icons.timer_outlined),
-          // One-tap fallback; the field also auto-fills whenever you come
-          // back from the authenticator with a code on the clipboard.
-          suffixIcon: IconButton(
-            tooltip: 'Paste code',
-            icon: const Icon(Icons.content_paste_go),
-            onPressed: () => _tryAutoFillTotp(manual: true),
-          ),
+        decoration: _dec('TOTP code', Icons.timer_outlined,
+            hint: '••••••',
+            // One-tap fallback; the field also auto-fills whenever you come
+            // back from the authenticator with a code on the clipboard.
+            suffix: IconButton(
+              tooltip: 'Paste code',
+              icon: const Icon(Icons.content_paste_go),
+              onPressed: () => _tryAutoFillTotp(manual: true),
+            )),
+      ),
+      const SizedBox(height: 12),
+      // Auto-paste explainer chip
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.blue.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.auto_awesome, size: 16, color: Colors.blue.shade300),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Copy the code in your authenticator and switch back — '
+                'it fills in by itself.',
+                style: TextStyle(
+                    fontSize: 12, color: cs.onSurfaceVariant, height: 1.3),
+              ),
+            ),
+          ],
         ),
       ),
-      const SizedBox(height: 8),
-      const Text(
-        'Tip: copy the code in your authenticator and switch back — it '
-        'pastes itself. PIN and TOTP are used once and never stored.',
-        style: TextStyle(color: Colors.grey, fontSize: 12),
-      ),
-      const SizedBox(height: 24),
-      ElevatedButton.icon(
+      const SizedBox(height: 20),
+      FilledButton.icon(
         onPressed: _generating ? null : _generate,
+        style: _ctaStyle,
         icon: _generating
             ? const SizedBox(
                 width: 18,
@@ -302,14 +395,13 @@ class _TokenEntryScreenState extends State<TokenEntryScreen>
                     strokeWidth: 2, color: Colors.white),
               )
             : const Icon(Icons.bolt),
-        label: Text(
-          _generating ? 'Generating…' : 'Generate & Continue',
-          style: const TextStyle(fontSize: 16),
-        ),
-        style: ElevatedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(vertical: 14),
-          backgroundColor: Colors.blue,
-          foregroundColor: Colors.white,
+        label: Text(_generating ? 'Generating…' : 'Generate & Continue'),
+      ),
+      const SizedBox(height: 10),
+      Center(
+        child: Text(
+          'PIN and TOTP are used once and never stored',
+          style: TextStyle(color: Colors.grey.shade600, fontSize: 11.5),
         ),
       ),
     ];
