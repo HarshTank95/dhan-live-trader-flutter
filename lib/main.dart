@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'screens/token_entry_screen.dart';
 import 'screens/ltp_screen.dart';
+import 'theme/app_theme.dart';
 import 'services/app_logger.dart';
 import 'services/run_logger.dart';
 import 'services/storage_service.dart';
@@ -110,17 +111,8 @@ class _MyAppState extends State<MyApp> {
       debugShowCheckedModeBanner: false,
       navigatorKey: navigatorKey,
       themeMode: _isDark ? ThemeMode.dark : ThemeMode.light,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.blue,
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
+      theme: AppTheme.light(),
+      darkTheme: AppTheme.dark(),
       home: widget.savedCredentials != null
           ? LtpScreen(
               clientId: widget.savedCredentials!.clientId,

@@ -8,6 +8,7 @@ import '../services/dhan_service.dart'
 import '../services/scrip_service.dart';
 import '../services/paper_trading_service.dart';
 import '../services/storage_service.dart';
+import '../theme/app_theme.dart';
 import 'chart_screen.dart';
 import 'holdings_screen.dart';
 import 'log_viewer_screen.dart';
@@ -61,6 +62,10 @@ class _LtpScreenState extends State<LtpScreen> {
   // Paper trading
   final PaperTradingService _paperService = PaperTradingService();
   String _tradingMode = 'paper'; // 'paper' or 'live'
+
+  // Price tick flash — securityId → latest tick (row pulses green/red on LTP change)
+  final Map<int, _FlashTick> _flashes = {};
+  int _flashSeq = 0;
 
   WatchlistModel? get _activeWatchlist {
     try {
@@ -164,6 +169,15 @@ class _LtpScreenState extends State<LtpScreen> {
       );
     }).toList();
 
+    // Detect per-stock LTP ticks so the row can flash green/red.
+    final prevLtp = {for (final q in _quotes) q.securityId: q.ltp};
+    for (final nq in newQuotes) {
+      final old = prevLtp[nq.securityId];
+      if (old != null && old > 0 && nq.ltp > 0 && nq.ltp != old) {
+        _flashes[nq.securityId] = _FlashTick(++_flashSeq, nq.ltp > old);
+      }
+    }
+
     setState(() {
       _quotes = _sorted(newQuotes);
       _isLoading = false;
@@ -184,17 +198,13 @@ class _LtpScreenState extends State<LtpScreen> {
     _service.setWatchlist(scrips);
   }
 
-  Future<void> _switchWatchlist(String id) async {
-    if (_activeWatchlistId == id) {
-      Navigator.pop(context);
-      return;
-    }
+  Future<void> _selectWatchlist(String id) async {
+    if (_activeWatchlistId == id) return;
     setState(() {
       _activeWatchlistId = id;
       _isLoading = true;
       _quotes = [];
     });
-    Navigator.pop(context); // close drawer
     await StorageService.saveActiveWatchlistId(id);
     _applyActiveWatchlist();
     // Load prevCloses for new watchlist in background (needed by pull-to-refresh)
@@ -269,8 +279,8 @@ class _LtpScreenState extends State<LtpScreen> {
     });
   }
 
-  Future<void> _openWatchlistManager() async {
-    Navigator.pop(context); // close drawer
+  Future<void> _openWatchlistManager({bool fromDrawer = true}) async {
+    if (fromDrawer) Navigator.pop(context); // close drawer
 
     final result = await Navigator.push<({List<WatchlistModel> watchlists, String activeId})>(
       context,
@@ -406,8 +416,7 @@ class _LtpScreenState extends State<LtpScreen> {
   }
 
   void _showStockDetail(StockQuote q) {
-    final color = q.isPositive ? Colors.green : Colors.red;
-    final arrow = q.isPositive ? '▲' : '▼';
+    final color = q.isPositive ? AppColors.up : AppColors.down;
 
     showModalBottomSheet(
       context: context,
@@ -424,7 +433,7 @@ class _LtpScreenState extends State<LtpScreen> {
               child: Container(
                 width: 40, height: 4,
                 decoration: BoxDecoration(
-                  color: Colors.grey.shade300,
+                  color: Colors.white24,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -466,18 +475,17 @@ class _LtpScreenState extends State<LtpScreen> {
             Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text('₹${q.ltp.toStringAsFixed(2)}',
-                    style: const TextStyle(
-                        fontSize: 32, fontWeight: FontWeight.bold)),
+                Text('₹${AppFmt.inr(q.ltp)}', style: AppText.priceXL),
                 const SizedBox(width: 12),
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
+                  padding: const EdgeInsets.only(bottom: 5),
                   child: Text(
-                    '$arrow ${q.change.abs().toStringAsFixed(2)} (${q.changePercent.toStringAsFixed(2)}%)',
+                    AppFmt.changeLine(q.change, q.changePercent),
                     style: TextStyle(
                         color: color,
                         fontWeight: FontWeight.w600,
-                        fontSize: 14),
+                        fontSize: 14,
+                        fontFeatures: const [FontFeature.tabularFigures()]),
                   ),
                 ),
               ],
@@ -493,12 +501,12 @@ class _LtpScreenState extends State<LtpScreen> {
               mainAxisSpacing: 8,
               physics: const NeverScrollableScrollPhysics(),
               children: [
-                _detailTile('Open', '₹${q.open.toStringAsFixed(2)}'),
-                _detailTile('High', '₹${q.high.toStringAsFixed(2)}',
-                    color: Colors.green),
-                _detailTile('Low', '₹${q.low.toStringAsFixed(2)}',
-                    color: Colors.red),
-                _detailTile('Prev Close', '₹${q.prevClose.toStringAsFixed(2)}'),
+                _detailTile('Open', '₹${AppFmt.inr(q.open)}'),
+                _detailTile('High', '₹${AppFmt.inr(q.high)}',
+                    color: AppColors.up),
+                _detailTile('Low', '₹${AppFmt.inr(q.low)}',
+                    color: AppColors.down),
+                _detailTile('Prev Close', '₹${AppFmt.inr(q.prevClose)}'),
               ],
             ),
             const SizedBox(height: 16),
@@ -509,8 +517,9 @@ class _LtpScreenState extends State<LtpScreen> {
                   Expanded(
                     child: ElevatedButton(
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.green,
-                        foregroundColor: Colors.white,
+                        backgroundColor: AppColors.up,
+                        foregroundColor: const Color(0xFF0B0D10),
+                        elevation: 0,
                         padding: const EdgeInsets.symmetric(vertical: 12),
                         shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(12)),
@@ -521,15 +530,18 @@ class _LtpScreenState extends State<LtpScreen> {
                       },
                       child: const Text('BUY',
                           style: TextStyle(
-                              fontSize: 15, fontWeight: FontWeight.w700)),
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.5)),
                     ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: ElevatedButton(
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red,
-                        foregroundColor: Colors.white,
+                        backgroundColor: AppColors.down,
+                        foregroundColor: const Color(0xFF0B0D10),
+                        elevation: 0,
                         padding: const EdgeInsets.symmetric(vertical: 12),
                         shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(12)),
@@ -540,7 +552,9 @@ class _LtpScreenState extends State<LtpScreen> {
                       },
                       child: const Text('SELL',
                           style: TextStyle(
-                              fontSize: 15, fontWeight: FontWeight.w700)),
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.5)),
                     ),
                   ),
                 ],
@@ -552,8 +566,9 @@ class _LtpScreenState extends State<LtpScreen> {
                   Expanded(
                     child: ElevatedButton(
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.grey.shade400,
-                        foregroundColor: Colors.white,
+                        backgroundColor: AppColors.surfaceRaised,
+                        foregroundColor: AppColors.textMuted,
+                        elevation: 0,
                         padding: const EdgeInsets.symmetric(vertical: 12),
                         shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(12)),
@@ -575,8 +590,9 @@ class _LtpScreenState extends State<LtpScreen> {
               width: double.infinity,
               child: ElevatedButton.icon(
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.blue,
-                  foregroundColor: Colors.white,
+                  backgroundColor: AppColors.accentDim,
+                  foregroundColor: AppColors.accent,
+                  elevation: 0,
                   padding: const EdgeInsets.symmetric(vertical: 12),
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12)),
@@ -641,7 +657,9 @@ class _LtpScreenState extends State<LtpScreen> {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
-          color: (color ?? Colors.blue).withValues(alpha: 0.07),
+          color: color == null
+              ? AppColors.surfaceRaised
+              : color.withValues(alpha: 0.08),
           borderRadius: BorderRadius.circular(10),
         ),
         child: Column(
@@ -681,233 +699,23 @@ class _LtpScreenState extends State<LtpScreen> {
   @override
   Widget build(BuildContext context) {
     final isDark = MyApp.of(context).isDark;
-    final activeWl = _activeWatchlist;
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(activeWl?.name ?? 'Live Prices'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        title: const Text('Watchlist'),
         actions: [
-          // Paper/Live toggle
-          GestureDetector(
-            onTap: () async {
-              if (_tradingMode == 'paper') {
-                // Switching to Live — show warning
-                final confirmed = await showDialog<bool>(
-                  context: context,
-                  builder: (ctx) => AlertDialog(
-                    icon: const Icon(Icons.warning_amber_rounded,
-                        color: Colors.orange, size: 40),
-                    title: const Text('Switch to Live Mode?'),
-                    content: const Text(
-                      'In Live mode, orders will be placed using your real Dhan account with actual money.\n\n'
-                      'Make sure you understand the risks before proceeding.',
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(ctx, false),
-                        child: const Text('Stay on Paper'),
-                      ),
-                      FilledButton(
-                        style: FilledButton.styleFrom(
-                            backgroundColor: Colors.orange),
-                        onPressed: () => Navigator.pop(ctx, true),
-                        child: const Text('Switch to Live'),
-                      ),
-                    ],
-                  ),
-                );
-                if (confirmed != true) return;
-              }
-              setState(() {
-                _tradingMode = _tradingMode == 'paper' ? 'live' : 'paper';
-              });
-              StorageService.saveTradingMode(_tradingMode);
-            },
-            child: Container(
-              margin: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: _tradingMode == 'paper'
-                    ? Colors.teal.withOpacity(0.15)
-                    : Colors.orange.withOpacity(0.15),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(
-                  color: _tradingMode == 'paper' ? Colors.teal : Colors.orange,
-                  width: 1,
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    _tradingMode == 'paper'
-                        ? Icons.description_outlined
-                        : Icons.bolt,
-                    size: 14,
-                    color: _tradingMode == 'paper' ? Colors.teal : Colors.orange,
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    _tradingMode == 'paper' ? 'PAPER' : 'LIVE',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      color: _tradingMode == 'paper' ? Colors.teal : Colors.orange,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-
-          // Market badge
-          Container(
-            margin: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: _isMarketOpen
-                  ? Colors.green.withOpacity(0.15)
-                  : Colors.red.withOpacity(0.15),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                  color: _isMarketOpen ? Colors.green : Colors.red, width: 1),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 6, height: 6,
-                  decoration: BoxDecoration(
-                    color: _isMarketOpen ? Colors.green : Colors.red,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                const SizedBox(width: 5),
-                Text(
-                  _isMarketOpen ? 'Open' : 'Closed',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: _isMarketOpen ? Colors.green : Colors.red,
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          // Sort
-          PopupMenuButton<SortMode>(
-            icon: const Icon(Icons.sort),
-            tooltip: 'Sort',
-            onSelected: _setSort,
-            itemBuilder: (_) => [
-              PopupMenuItem(
-                value: SortMode.changeDesc,
-                child: Row(children: [
-                  Icon(Icons.trending_up,
-                      color: _sortMode == SortMode.changeDesc
-                          ? Colors.blue : null, size: 18),
-                  const SizedBox(width: 8),
-                  const Text('Best performers first'),
-                ]),
-              ),
-              PopupMenuItem(
-                value: SortMode.changeAsc,
-                child: Row(children: [
-                  Icon(Icons.trending_down,
-                      color: _sortMode == SortMode.changeAsc
-                          ? Colors.blue : null, size: 18),
-                  const SizedBox(width: 8),
-                  const Text('Worst performers first'),
-                ]),
-              ),
-              PopupMenuItem(
-                value: SortMode.nameAsc,
-                child: Row(children: [
-                  Icon(Icons.sort_by_alpha,
-                      color: _sortMode == SortMode.nameAsc
-                          ? Colors.blue : null, size: 18),
-                  const SizedBox(width: 8),
-                  const Text('Name A → Z'),
-                ]),
-              ),
-            ],
-          ),
-
+          _MarketStatusPill(feedStatus: _feedStatus, marketOpen: _isMarketOpen),
+          const SizedBox(width: 12),
+          _buildPaperChip(),
+          const SizedBox(width: 16),
         ],
       ),
       onDrawerChanged: (opened) { if (opened) _fetchFunds(); },
       drawer: _buildDrawer(isDark),
       body: Column(
         children: [
-          // ── Search bar ────────────────────────────────────────────────
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
-            child: Material(
-              elevation: 2,
-              shadowColor: Colors.blue.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(14),
-              child: InkWell(
-                onTap: () async {
-                  if (!_scripService.isLoaded) return;
-                  final scrip = await showSearch<ScripInfo?>(
-                    context: context,
-                    delegate: _StockSearchDelegate(_scripService),
-                  );
-                  if (scrip != null && mounted) _addStockToWatchlist(scrip);
-                },
-                borderRadius: BorderRadius.circular(14),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: Colors.blue.withValues(alpha: 0.25),
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(6),
-                        decoration: BoxDecoration(
-                          color: Colors.blue.withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: const Icon(Icons.search, size: 16, color: Colors.blue),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          'Search & add stocks...',
-                          style: TextStyle(
-                            fontSize: 14,
-                            color: isDark ? Colors.grey.shade400 : Colors.grey.shade500,
-                          ),
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.blue.withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: const Text(
-                          '+ Add',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.blue,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-          // ── Stock list ────────────────────────────────────────────────
+          _buildSearchRow(),
+          _buildWatchlistTabs(),
           Expanded(
             child: RefreshIndicator(
               onRefresh: _fetchLTP,
@@ -915,6 +723,193 @@ class _LtpScreenState extends State<LtpScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Future<void> _toggleTradingMode() async {
+    if (_tradingMode == 'paper') {
+      // Switching to Live — show warning
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          icon: const Icon(Icons.warning_amber_rounded,
+              color: AppColors.warn, size: 40),
+          title: const Text('Switch to Live Mode?'),
+          content: const Text(
+            'In Live mode, orders will be placed using your real Dhan account with actual money.\n\n'
+            'Make sure you understand the risks before proceeding.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Stay on Paper'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: AppColors.warn),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Switch to Live'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+    setState(() {
+      _tradingMode = _tradingMode == 'paper' ? 'live' : 'paper';
+    });
+    StorageService.saveTradingMode(_tradingMode);
+  }
+
+  Widget _buildPaperChip() {
+    final isPaper = _tradingMode == 'paper';
+    return InkWell(
+      onTap: _toggleTradingMode,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: isPaper
+                ? const Color(0x24FFFFFF)
+                : AppColors.warn.withValues(alpha: 0.5),
+          ),
+          color: isPaper
+              ? Colors.transparent
+              : AppColors.warn.withValues(alpha: 0.08),
+        ),
+        child: Text(
+          isPaper ? 'PAPER' : 'LIVE',
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.1,
+            color: isPaper ? AppColors.textMuted : AppColors.warn,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSearchRow() {
+    final count = _activeWatchlist?.stockIds.length ?? 0;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 2),
+      child: Material(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          onTap: () async {
+            if (!_scripService.isLoaded) return;
+            final scrip = await showSearch<ScripInfo?>(
+              context: context,
+              delegate: _StockSearchDelegate(_scripService),
+            );
+            if (scrip != null && mounted) _addStockToWatchlist(scrip);
+          },
+          borderRadius: BorderRadius.circular(12),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 2, 4, 2),
+            child: Row(
+              children: [
+                const Icon(Icons.search, size: 18, color: AppColors.textMuted),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text('Search & add',
+                      style: TextStyle(
+                          fontSize: 13.5, color: AppColors.textMuted)),
+                ),
+                Text('$count/20', style: AppText.counter),
+                PopupMenuButton<SortMode>(
+                  icon: const Icon(Icons.swap_vert,
+                      size: 18, color: AppColors.textMuted),
+                  tooltip: 'Sort',
+                  onSelected: _setSort,
+                  itemBuilder: (_) => [
+                    PopupMenuItem(
+                      value: SortMode.changeDesc,
+                      child: Row(children: [
+                        Icon(Icons.trending_up,
+                            color: _sortMode == SortMode.changeDesc
+                                ? AppColors.accent : null, size: 18),
+                        const SizedBox(width: 8),
+                        const Text('Best performers first'),
+                      ]),
+                    ),
+                    PopupMenuItem(
+                      value: SortMode.changeAsc,
+                      child: Row(children: [
+                        Icon(Icons.trending_down,
+                            color: _sortMode == SortMode.changeAsc
+                                ? AppColors.accent : null, size: 18),
+                        const SizedBox(width: 8),
+                        const Text('Worst performers first'),
+                      ]),
+                    ),
+                    PopupMenuItem(
+                      value: SortMode.nameAsc,
+                      child: Row(children: [
+                        Icon(Icons.sort_by_alpha,
+                            color: _sortMode == SortMode.nameAsc
+                                ? AppColors.accent : null, size: 18),
+                        const SizedBox(width: 8),
+                        const Text('Name A → Z'),
+                      ]),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWatchlistTabs() {
+    return SizedBox(
+      height: 42,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        children: [
+          for (final wl in _watchlists) _watchlistTab(wl),
+          InkWell(
+            onTap: () => _openWatchlistManager(fromDrawer: false),
+            borderRadius: BorderRadius.circular(8),
+            child: const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 12),
+              child: Icon(Icons.add, size: 18, color: AppColors.textMuted),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _watchlistTab(WatchlistModel wl) {
+    final active = wl.id == _activeWatchlistId;
+    return InkWell(
+      onTap: () => _selectWatchlist(wl.id),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(
+                color: active ? AppColors.accent : Colors.transparent,
+                width: 2),
+          ),
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          wl.name,
+          style: TextStyle(
+            fontSize: 13.5,
+            fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+            color: active ? AppColors.accent : AppColors.textMuted,
+          ),
+        ),
       ),
     );
   }
@@ -929,46 +924,42 @@ class _LtpScreenState extends State<LtpScreen> {
             width: double.infinity,
             padding: const EdgeInsets.fromLTRB(20, 56, 20, 24),
             decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                colors: [Color(0xFF1565C0), Color(0xFF42A5F5)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
+              color: AppColors.surface,
+              border: Border(bottom: BorderSide(color: AppColors.hairline)),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Container(
-                  width: 56, height: 56,
+                  width: 52, height: 52,
                   decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(16),
+                    color: AppColors.accentDim,
+                    borderRadius: BorderRadius.circular(15),
                     border: Border.all(
-                        color: Colors.white.withOpacity(0.4), width: 1.5),
+                        color: AppColors.accent.withValues(alpha: 0.35)),
                   ),
                   child: const Icon(Icons.candlestick_chart_rounded,
-                      color: Colors.white, size: 30),
+                      color: AppColors.accent, size: 27),
                 ),
                 const SizedBox(height: 16),
-                const Text('Dhan LTP Viewer',
+                const Text('Dhan Trader',
                     style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold)),
-                const SizedBox(height: 4),
+                        fontSize: 19,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.3)),
+                const SizedBox(height: 5),
                 Row(
                   children: [
                     Container(
-                      width: 7, height: 7,
+                      width: 6, height: 6,
                       decoration: const BoxDecoration(
-                          color: Color(0xFF69F0AE), shape: BoxShape.circle),
+                          color: AppColors.up, shape: BoxShape.circle),
                     ),
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text('Client: ${widget.clientId}',
-                          style: TextStyle(
-                              color: Colors.white.withOpacity(0.85),
-                              fontSize: 12),
+                          style: const TextStyle(
+                              color: AppColors.textMuted, fontSize: 12),
                           overflow: TextOverflow.ellipsis),
                     ),
                   ],
@@ -988,9 +979,7 @@ class _LtpScreenState extends State<LtpScreen> {
                       ? Container(
                           height: 62,
                           decoration: BoxDecoration(
-                            color: isDark
-                                ? Colors.grey.shade800
-                                : Colors.grey.shade100,
+                            color: AppColors.surface,
                             borderRadius: BorderRadius.circular(12),
                           ),
                           child: const Center(
@@ -1005,15 +994,9 @@ class _LtpScreenState extends State<LtpScreen> {
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 16, vertical: 12),
                               decoration: BoxDecoration(
-                                color: isDark
-                                    ? Colors.grey.shade800
-                                    : Colors.blue.shade50,
+                                color: AppColors.surface,
                                 borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: isDark
-                                      ? Colors.grey.shade700
-                                      : Colors.blue.shade100,
-                                ),
+                                border: Border.all(color: AppColors.hairline),
                               ),
                               child: Row(
                                 children: [
@@ -1031,7 +1014,7 @@ class _LtpScreenState extends State<LtpScreen> {
                                           style: const TextStyle(
                                               fontSize: 14,
                                               fontWeight: FontWeight.bold,
-                                              color: Colors.green),
+                                              color: AppColors.up),
                                         ),
                                       ],
                                     ),
@@ -1057,7 +1040,7 @@ class _LtpScreenState extends State<LtpScreen> {
                                             style: const TextStyle(
                                                 fontSize: 14,
                                                 fontWeight: FontWeight.bold,
-                                                color: Colors.orange),
+                                                color: AppColors.warn),
                                           ),
                                         ],
                                       ),
@@ -1081,25 +1064,30 @@ class _LtpScreenState extends State<LtpScreen> {
                     child: ListTile(
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12)),
-                      tileColor: isActive
-                          ? Colors.blue.withOpacity(0.08)
-                          : null,
+                      tileColor: isActive ? AppColors.accentDim : null,
                       leading: Icon(
                         isActive
                             ? Icons.radio_button_checked
                             : Icons.radio_button_unchecked,
-                        color: isActive ? Colors.blue : Colors.grey,
+                        color: isActive
+                            ? AppColors.accent
+                            : AppColors.textMuted,
+                        size: 20,
                       ),
                       title: Text(wl.name,
                           style: TextStyle(
                               fontWeight: isActive
-                                  ? FontWeight.bold
+                                  ? FontWeight.w600
                                   : FontWeight.normal,
-                              color: isActive ? Colors.blue : null,
+                              color: isActive ? AppColors.accent : null,
                               fontSize: 14)),
                       subtitle: Text('${wl.stockIds.length} stocks',
-                          style: const TextStyle(fontSize: 11)),
-                      onTap: () => _switchWatchlist(wl.id),
+                          style: const TextStyle(
+                              fontSize: 11, color: AppColors.textMuted)),
+                      onTap: () {
+                        Navigator.pop(context); // close drawer
+                        _selectWatchlist(wl.id);
+                      },
                     ),
                   );
                 }),
@@ -1107,7 +1095,7 @@ class _LtpScreenState extends State<LtpScreen> {
                 _drawerTile(
                   icon: Icons.settings_outlined,
                   label: 'Manage Watchlists',
-                  iconColor: const Color(0xFF2E7D32),
+                  iconColor: AppColors.textMuted,
                   onTap: _openWatchlistManager,
                 ),
 
@@ -1118,7 +1106,7 @@ class _LtpScreenState extends State<LtpScreen> {
                 _drawerTile(
                   icon: Icons.auto_graph,
                   label: 'Strategies',
-                  iconColor: Colors.deepPurple,
+                  iconColor: AppColors.textMuted,
                   onTap: _openStrategies,
                 ),
 
@@ -1129,7 +1117,7 @@ class _LtpScreenState extends State<LtpScreen> {
                 _drawerTile(
                   icon: Icons.article_outlined,
                   label: 'View Logs',
-                  iconColor: Colors.blueGrey,
+                  iconColor: AppColors.textMuted,
                   onTap: () {
                     Navigator.pop(context); // close drawer
                     Navigator.push(
@@ -1148,26 +1136,26 @@ class _LtpScreenState extends State<LtpScreen> {
                 _drawerTile(
                   icon: Icons.pie_chart_outline_rounded,
                   label: 'Holdings / Portfolio',
-                  iconColor: const Color(0xFF6750A4),
+                  iconColor: AppColors.textMuted,
                   onTap: _openHoldings,
                 ),
                 _drawerTile(
                   icon: Icons.receipt_long_outlined,
                   label: 'Paper Trading',
-                  iconColor: Colors.teal,
+                  iconColor: AppColors.textMuted,
                   onTap: _openPaperPositions,
                 ),
                 _drawerTile(
                   icon: Icons.manage_accounts_outlined,
                   label: 'Edit Credentials',
-                  iconColor: const Color(0xFF1565C0),
+                  iconColor: AppColors.textMuted,
                   onTap: _openEditCredentials,
                 ),
                 _drawerTile(
                   icon: Icons.logout_rounded,
                   label: 'Clear & Logout',
-                  iconColor: Colors.redAccent,
-                  labelColor: Colors.redAccent,
+                  iconColor: AppColors.down,
+                  labelColor: AppColors.down,
                   onTap: _logout,
                 ),
 
@@ -1184,12 +1172,12 @@ class _LtpScreenState extends State<LtpScreen> {
                     leading: Container(
                       width: 38, height: 38,
                       decoration: BoxDecoration(
-                        color: Colors.purple.withOpacity(0.1),
+                        color: AppColors.surface,
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: Icon(
                           isDark ? Icons.dark_mode : Icons.light_mode,
-                          color: Colors.purple, size: 20),
+                          color: AppColors.textMuted, size: 20),
                     ),
                     title: Text(isDark ? 'Dark Mode' : 'Light Mode',
                         style: const TextStyle(
@@ -1197,7 +1185,6 @@ class _LtpScreenState extends State<LtpScreen> {
                     trailing: Switch(
                       value: isDark,
                       onChanged: (_) => MyApp.of(context).toggleTheme(),
-                      activeColor: Colors.blue,
                     ),
                   ),
                 ),
@@ -1274,10 +1261,6 @@ class _LtpScreenState extends State<LtpScreen> {
     );
   }
 
-  int get _gainers => _quotes.where((q) => q.changePercent > 0).length;
-  int get _losers  => _quotes.where((q) => q.changePercent < 0).length;
-  int get _flat    => _quotes.where((q) => q.changePercent == 0).length;
-
   Widget _buildBody() {
     if (_isLoadingScrips) {
       return const Center(
@@ -1316,7 +1299,7 @@ class _LtpScreenState extends State<LtpScreen> {
               : _isRateLimitError
                   ? Icons.hourglass_empty_rounded
                   : Icons.error_outline;
-      final iconColor = _isRateLimitError ? Colors.orange : Colors.red;
+      final iconColor = _isRateLimitError ? AppColors.warn : AppColors.down;
       final title = _isAuthError
           ? 'Token Expired'
           : _isNetworkError
@@ -1355,8 +1338,9 @@ class _LtpScreenState extends State<LtpScreen> {
                   if (_isAuthError)
                     ElevatedButton.icon(
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.blue,
-                        foregroundColor: Colors.white,
+                        backgroundColor: AppColors.accent,
+                        foregroundColor: const Color(0xFF0B0D10),
+                        elevation: 0,
                         padding: const EdgeInsets.symmetric(
                             horizontal: 24, vertical: 12),
                       ),
@@ -1393,7 +1377,7 @@ class _LtpScreenState extends State<LtpScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.playlist_add, size: 56, color: Colors.grey.shade300),
+            const Icon(Icons.playlist_add, size: 56, color: AppColors.textFaint),
             const SizedBox(height: 16),
             const Text('This watchlist is empty',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
@@ -1406,152 +1390,135 @@ class _LtpScreenState extends State<LtpScreen> {
       );
     }
 
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          color: Theme.of(context).colorScheme.surfaceContainerHighest,
-          child: const Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text('Symbol',
-                  style: TextStyle(
-                      fontWeight: FontWeight.bold, color: Colors.grey)),
-              Text('LTP / Change',
-                  style: TextStyle(
-                      fontWeight: FontWeight.bold, color: Colors.grey)),
-            ],
-          ),
-        ),
-        Expanded(
-          child: ListView.separated(
-            physics: const AlwaysScrollableScrollPhysics(),
-            itemCount: _quotes.length,
-            separatorBuilder: (_, __) => const Divider(height: 1),
-            itemBuilder: (context, index) {
-              final q = _quotes[index];
-              final color = q.isPositive ? Colors.green : Colors.red;
-              final arrow = q.isPositive ? '▲' : '▼';
+    return ListView.separated(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.only(top: 2, bottom: 24),
+      itemCount: _quotes.length,
+      separatorBuilder: (_, __) =>
+          const Divider(indent: 16, endIndent: 16),
+      itemBuilder: (context, index) => _buildQuoteRow(_quotes[index]),
+    );
+  }
 
-              // Broker-standard row (Kite/Dhan style): lead with the symbol
-              // itself + a small exchange tag — no letter avatars.
-              return ListTile(
-                onTap: () => _showStockDetail(q),
-                contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 16, vertical: 10),
-                title: Row(
-                  children: [
-                    Flexible(
-                      child: Text(q.symbol,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              fontWeight: FontWeight.bold, fontSize: 16)),
-                    ),
-                    const SizedBox(width: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 5, vertical: 1.5),
-                      decoration: BoxDecoration(
-                        color: Colors.grey.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text('NSE',
-                          style: TextStyle(
-                              fontSize: 9,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 0.5,
-                              color: Colors.grey.shade500)),
-                    ),
-                  ],
-                ),
-                subtitle: Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Text(q.name,
-                      style: const TextStyle(
-                          color: Colors.grey, fontSize: 11),
+  Widget _buildQuoteRow(StockQuote q) {
+    final chColor = q.isPositive ? AppColors.up : AppColors.down;
+    final Widget row = InkWell(
+      onTap: () => _showStockDetail(q),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(q.symbol, style: AppText.symbol),
+                  const SizedBox(height: 3),
+                  Text(q.name,
+                      style: AppText.rowSub,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis),
-                ),
-                trailing: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text('₹${q.ltp.toStringAsFixed(2)}',
-                        style: const TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 2),
-                    Text(
-                      '$arrow ${q.change.abs().toStringAsFixed(2)}  (${q.changePercent.toStringAsFixed(2)}%)',
-                      style: TextStyle(
-                          fontSize: 12,
-                          color: color,
-                          fontWeight: FontWeight.w500),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-        ),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          color: Theme.of(context).colorScheme.surfaceContainerHighest,
-          child: Row(
-            children: [
-              // ● LIVE status
-              Container(
-                width: 7, height: 7,
-                decoration: BoxDecoration(
-                  color: switch (_feedStatus) {
-                    FeedStatus.connected => Colors.green,
-                    FeedStatus.connecting => Colors.orange,
-                    FeedStatus.disconnected => Colors.red,
-                  },
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 6),
-              Text(
-                switch (_feedStatus) {
-                  FeedStatus.connected => _isMarketOpen ? 'LIVE' : 'Connected',
-                  FeedStatus.connecting => 'Connecting...',
-                  FeedStatus.disconnected => 'Reconnecting...',
-                },
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: switch (_feedStatus) {
-                    FeedStatus.connected => Colors.green,
-                    FeedStatus.connecting => Colors.orange,
-                    FeedStatus.disconnected => Colors.red,
-                  },
-                ),
-              ),
-              // Gainers / Losers summary
-              if (_quotes.isNotEmpty) ...[
-                const Spacer(),
-                Text('▲ $_gainers',
-                    style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.green)),
-                const SizedBox(width: 10),
-                Text('▼ $_losers',
-                    style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.red)),
-                if (_flat > 0) ...[
-                  const SizedBox(width: 10),
-                  Text('— $_flat',
-                      style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.grey.shade500)),
                 ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(AppFmt.inr(q.ltp), style: AppText.price),
+                const SizedBox(height: 3),
+                Text(AppFmt.changeLine(q.change, q.changePercent),
+                    style: AppText.change.copyWith(color: chColor)),
               ],
-            ],
-          ),
+            ),
+          ],
         ),
+      ),
+    );
+
+    final flash = _flashes[q.securityId];
+    if (flash == null) return row;
+    final flashColor = flash.up ? AppColors.up : AppColors.down;
+    return TweenAnimationBuilder<double>(
+      key: ValueKey('flash_${q.securityId}_${flash.seq}'),
+      tween: Tween(begin: 1, end: 0),
+      duration: const Duration(milliseconds: 600),
+      curve: Curves.easeOut,
+      builder: (context, t, child) => ColoredBox(
+        color: flashColor.withValues(alpha: 0.10 * t),
+        child: child,
+      ),
+      child: row,
+    );
+  }
+}
+
+/// One LTP tick on one stock — drives the row's flash animation.
+class _FlashTick {
+  final int seq;
+  final bool up;
+  const _FlashTick(this.seq, this.up);
+}
+
+/// Ambient market/feed status: a small dot + label in the app bar.
+/// Pulses (gold) only when the feed is connected AND the market is open.
+class _MarketStatusPill extends StatefulWidget {
+  final FeedStatus feedStatus;
+  final bool marketOpen;
+  const _MarketStatusPill(
+      {required this.feedStatus, required this.marketOpen});
+
+  @override
+  State<_MarketStatusPill> createState() => _MarketStatusPillState();
+}
+
+class _MarketStatusPillState extends State<_MarketStatusPill>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1200),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final live =
+        widget.feedStatus == FeedStatus.connected && widget.marketOpen;
+    final (color, label) = switch (widget.feedStatus) {
+      FeedStatus.connected =>
+        live ? (AppColors.accent, 'LIVE') : (AppColors.textFaint, 'CLOSED'),
+      FeedStatus.connecting => (AppColors.warn, 'SYNC'),
+      FeedStatus.disconnected => (AppColors.down, 'OFFLINE'),
+    };
+
+    Widget dot = Container(
+      width: 7,
+      height: 7,
+      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+    );
+    if (live) {
+      dot = FadeTransition(
+        opacity: Tween<double>(begin: 0.35, end: 1).animate(_pulse),
+        child: dot,
+      );
+    }
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        dot,
+        const SizedBox(width: 6),
+        Text(label,
+            style: TextStyle(
+                fontSize: 10.5,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 1.1,
+                color: color)),
       ],
     );
   }
@@ -1676,7 +1643,8 @@ class _StockSearchDelegate extends SearchDelegate<ScripInfo?> {
             style: const TextStyle(fontSize: 12),
             overflow: TextOverflow.ellipsis,
           ),
-          trailing: const Icon(Icons.add_circle_outline, color: Colors.blue),
+          trailing:
+              const Icon(Icons.add_circle_outline, color: AppColors.accent),
           onTap: () => close(context, scrip),
         );
       },

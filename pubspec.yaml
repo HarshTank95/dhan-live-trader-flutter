@@ -45,6 +45,7 @@ dependencies:
   fl_chart: ^0.70.2
   timezone: ^0.10.0
   wakelock_plus: ^1.2.10
+  google_fonts: ^6.2.1
 
 dev_dependencies:
   flutter_native_splash: ^2.4.3
@@ -70,8 +71,8 @@ flutter:
   uses-material-design: true
 
 flutter_native_splash:
-  color: "#1565C0"
-  color_dark: "#0D47A1"
+  color: "#0B0D10"
+  color_dark: "#0B0D10"
   android: true
   ios: false
 
