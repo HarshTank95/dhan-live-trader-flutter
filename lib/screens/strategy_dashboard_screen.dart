@@ -220,6 +220,10 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
       final progress = event['progress'] as int?;
       final candidates = event['candidates'] as int?;
       final activeStocks = event['activeStocks'] as int?;
+      // Optional explicit phase (1=Load 2=Pre-Mkt 3=Screen 4=Monitor 5=Done).
+      // Strategies that send it (ORB live) drive the stepper directly;
+      // others keep the message-sniffing fallback below.
+      final phase = event['phase'] as int?;
 
       setState(() {
         if (message.isNotEmpty) _statusMessage = message;
@@ -227,12 +231,17 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
         if (candidates != null) _candidateCount = candidates;
         if (activeStocks != null) _activeStocks = activeStocks;
 
-        // Detect phase from message content
-        if (message.contains('Fetching') || message.contains('Waiting for')) {
-          _currentPhase = 3;
-        }
-        if (message.contains('Monitoring LTP') || message.contains('candidates found')) {
-          if (_candidateCount > 0) _currentPhase = 4;
+        if (phase != null) {
+          _currentPhase = phase;
+        } else {
+          // Detect phase from message content
+          if (message.contains('Fetching') || message.contains('Waiting for')) {
+            _currentPhase = 3;
+          }
+          if (message.contains('Monitoring LTP') ||
+              message.contains('candidates found')) {
+            if (_candidateCount > 0) _currentPhase = 4;
+          }
         }
 
         if (status == 'running') {
