@@ -21,6 +21,9 @@ class BacktestProgressScreen extends StatefulWidget {
   /// backward compatibility with older navigation paths.
   final String strategyType;
 
+  /// 'static' (legacy fixed list) or a point-in-time index mode.
+  final String universeMode;
+
   const BacktestProgressScreen({
     super.key,
     required this.accessToken,
@@ -31,6 +34,7 @@ class BacktestProgressScreen extends StatefulWidget {
     required this.securityIds,
     required this.params,
     this.strategyType = 'dominance_breakout',
+    this.universeMode = 'static',
   });
 
   @override
@@ -76,6 +80,7 @@ class _BacktestProgressScreenState extends State<BacktestProgressScreen> {
       accessToken: widget.accessToken,
       clientId: widget.clientId,
       scripService: scripService,
+      universeMode: widget.universeMode,
       onProgress: (phase, completed, total, message) {
         if (!mounted) return;
         setState(() {

@@ -392,6 +392,7 @@ class _BacktestConfigScreenState extends State<BacktestConfigScreen> {
           securityIds: securityIds,
           params: Map.from(_params),
           strategyType: _strategyType,
+          universeMode: widget.config?.universeMode ?? 'static',
         ),
       ),
     );

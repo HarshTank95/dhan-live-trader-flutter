@@ -9,6 +9,7 @@ import '../services/app_logger.dart';
 import '../services/candle_repository.dart';
 import '../services/run_logger.dart';
 import '../services/scrip_service.dart';
+import '../services/universe_history_service.dart';
 import '../strategies/base_strategy.dart';
 import '../strategies/strategy_engine_context.dart';
 
@@ -28,12 +29,24 @@ typedef BacktestProgressCallback = void Function(
 class BacktestEngine {
   final BaseStrategy strategy;
   final Map<String, dynamic> params;
-  final List<int> securityIds;
+
+  /// Stock universe. For [universeMode] == 'static' this is the configured
+  /// list, unchanged. For point-in-time modes run() replaces it with the
+  /// resolved superset of every historical member across the range (data is
+  /// fetched for the superset; per-day scanning is filtered by membership).
+  List<int> securityIds;
   final String accessToken;
   final String clientId;
   final ScripService scripService;
+
+  /// 'static' or a point-in-time index mode ('nifty50'..'nifty500').
+  /// See [UniverseHistory].
+  final String universeMode;
   final BacktestProgressCallback? onProgress;
   final void Function(String message)? onLog;
+
+  /// Point-in-time symbol → security ID map (built in run() for PIT modes).
+  Map<String, int> _pitSymbolToId = {};
 
   bool _cancelled = false;
   // Per-backtest structured logger. Same JSONL format and viewer as live
@@ -47,9 +60,20 @@ class BacktestEngine {
     required this.accessToken,
     required this.clientId,
     required this.scripService,
+    this.universeMode = UniverseHistory.modeStatic,
     this.onProgress,
     this.onLog,
   });
+
+  /// Security IDs allowed to trade on [dateStr] under a point-in-time
+  /// universe, or null when static (no filtering). Membership changes only at
+  /// snapshot boundaries (~6-monthly), so this is cheap per day.
+  Set<int>? universeIdsForDate(String dateStr) {
+    if (universeMode == UniverseHistory.modeStatic) return null;
+    final syms = UniverseHistory.membersAsOf(universeMode, DateTime.parse(dateStr));
+    if (syms == null) return null;
+    return {for (final s in syms) if (_pitSymbolToId[s] != null) _pitSymbolToId[s]!};
+  }
 
   void cancel() => _cancelled = true;
   bool get isCancelled => _cancelled;
@@ -85,6 +109,33 @@ class BacktestEngine {
       startTime: startTimeStr,
       kind: 'backtest',
     );
+
+    // ── Point-in-time universe setup ────────────────────────────────
+    // Replace the configured (current-day) list with the superset of every
+    // historical index member across the range. Per-day scans then filter to
+    // membersAsOf(day), so each simulated day sees the universe as it was.
+    if (universeMode != UniverseHistory.modeStatic) {
+      await UniverseHistory.init();
+      final allSyms =
+          UniverseHistory.unionOverRange(universeMode, fromDate, toDate);
+      _pitSymbolToId = scripService.resolveSymbols(allSyms);
+      final unresolved =
+          allSyms.where((s) => !_pitSymbolToId.containsKey(s)).toList()..sort();
+      securityIds = _pitSymbolToId.values.toSet().toList();
+      _log('Point-in-time universe [$universeMode]: '
+          '${allSyms.length} historical members over range, '
+          '${securityIds.length} resolve in scrip master, '
+          '${unresolved.length} unresolved (delisted/merged)');
+      if (unresolved.isNotEmpty) {
+        _log('  unresolved: ${unresolved.join(", ")}');
+      }
+      _runLog?.info('Backtest', 'Point-in-time universe', {
+        'mode': universeMode,
+        'historicalMembers': allSyms.length,
+        'resolved': securityIds.length,
+        'unresolved': unresolved,
+      });
+    }
 
     _log('═══ BACKTEST STARTING ═══');
     _log('Strategy: ${strategy.displayName}');
@@ -160,12 +211,29 @@ class BacktestEngine {
       var chunkEnd = chunkStart.add(const Duration(days: chunkCalendarDays - 1));
       if (chunkEnd.isAfter(toDate)) chunkEnd = toDate;
 
+      // Under a point-in-time universe, fetch only the stocks that were
+      // members at some point during THIS chunk (plus pre-roll) — avoids
+      // hammering the API for stocks that hadn't entered the index yet.
+      final List<int> chunkIds;
+      if (universeMode == UniverseHistory.modeStatic) {
+        chunkIds = securityIds;
+      } else {
+        final chunkSyms = UniverseHistory.unionOverRange(
+            universeMode,
+            chunkStart.subtract(Duration(days: preRollCalendarDays)),
+            chunkEnd);
+        chunkIds = [
+          for (final s in chunkSyms)
+            if (_pitSymbolToId[s] != null) _pitSymbolToId[s]!
+        ];
+      }
+
       // Fetch this chunk's window (pre-roll + chunk). Cache-first: data the
       // previous chunk already fetched loads from SQLite without API calls.
-      onProgress?.call('download', 0, securityIds.length,
+      onProgress?.call('download', 0, chunkIds.length,
           'Chunk $chunkIdx/$totalChunks · downloading ${_fmt(chunkStart)} → ${_fmt(chunkEnd)}...');
       final chunkData = await CandleRepository.instance.bulkFetch(
-        securityIds: securityIds,
+        securityIds: chunkIds,
         fromDate: chunkStart.subtract(Duration(days: preRollCalendarDays)),
         toDate: chunkEnd,
         interval: interval,
@@ -215,6 +283,7 @@ class BacktestEngine {
                 dateStr: dateStr,
                 stockDateCandles: stockDateCandles,
                 historicalDays: historicalDays,
+                dayUniverse: universeIdsForDate(dateStr),
               );
 
         dayResults.add(dayResult);
@@ -374,6 +443,7 @@ class BacktestEngine {
     required String dateStr,
     required Map<int, Map<String, List<Candle>>> stockDateCandles,
     required int historicalDays,
+    Set<int>? dayUniverse,
   }) {
     final minAbsoluteVolume =
         (params['minAbsoluteVolume'] as num?)?.toInt() ?? 5000;
@@ -385,6 +455,8 @@ class BacktestEngine {
     var activeIds = <int>[];
 
     for (final secId in securityIds) {
+      // Point-in-time: skip stocks that weren't index members on this date.
+      if (dayUniverse != null && !dayUniverse.contains(secId)) continue;
       final dateMap = stockDateCandles[secId];
       if (dateMap == null) continue;
 
@@ -879,8 +951,16 @@ class _BtDayContext implements BacktestDayContext {
 
   @override
   Map<String, dynamic> get params => _e.params;
+
+  /// Under a point-in-time universe this is already filtered to the index
+  /// members as of [dateStr] — custom-engine strategies iterate it directly
+  /// and need no universe awareness of their own.
   @override
-  List<int> get securityIds => _e.securityIds;
+  List<int> get securityIds {
+    final u = _e.universeIdsForDate(dateStr);
+    if (u == null) return _e.securityIds;
+    return _e.securityIds.where(u.contains).toList();
+  }
   @override
   ScripService get scripService => _e.scripService;
   @override

@@ -17,6 +17,7 @@ import '../services/rate_limiter.dart';
 import '../services/run_logger.dart';
 import '../services/scrip_service.dart';
 import '../services/storage_service.dart';
+import '../services/universe_history_service.dart';
 import '../strategies/base_strategy.dart';
 import '../strategies/dominance_breakout_strategy.dart';
 import '../strategies/strategy_registry.dart';
@@ -234,8 +235,16 @@ class StrategyEngine {
     await _scripService.loadIndexConstituents();
     _log('Engine', 'Scrip master loaded: ${_scripService.isLoaded ? "yes" : "FAILED"}');
 
-    // Get Nifty 500 security IDs
-    if (config.securityIds.isNotEmpty) {
+    // Resolve the stock universe. Point-in-time modes trade the index's
+    // CURRENT members (today's fetched constituent list — for "now", current
+    // membership IS the point-in-time membership), which also auto-retires
+    // dead symbols in the static list after every index review.
+    if (config.universeMode != UniverseHistory.modeStatic) {
+      final label = UniverseHistory.universeLabel(config.universeMode);
+      _securityIds = _scripService.getSecurityIdsForUniverse(label);
+      _log('Engine',
+          'Universe [$label · point-in-time/current]: ${_securityIds.length} stocks');
+    } else if (config.securityIds.isNotEmpty) {
       _securityIds = List.from(config.securityIds);
     } else {
       _securityIds = _scripService.getSecurityIdsForUniverse('Nifty 500');

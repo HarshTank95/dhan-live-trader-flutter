@@ -10,6 +10,12 @@ class StrategyConfigModel {
   int reminderMinutesBefore; // 5..180, lead time before market open
   Map<String, dynamic> params;
   List<int> securityIds; // stock universe to scan
+
+  /// Stock-universe mode. 'static' = the fixed securityIds list (legacy).
+  /// 'nifty50'/'nifty100'/'nifty200'/'nifty500' = point-in-time index
+  /// membership: backtests scan the actual members as of each simulated date
+  /// (survivorship-bias-free); live runs scan the current members.
+  String universeMode;
   final DateTime createdAt;
   DateTime updatedAt;
 
@@ -23,6 +29,7 @@ class StrategyConfigModel {
     this.reminderMinutesBefore = 60,
     required this.params,
     this.securityIds = const [],
+    this.universeMode = 'static',
     DateTime? createdAt,
     DateTime? updatedAt,
   })  : id = id ?? const Uuid().v4(),
@@ -39,6 +46,7 @@ class StrategyConfigModel {
         'reminderMinutesBefore': reminderMinutesBefore,
         'params': params,
         'securityIds': securityIds,
+        'universeMode': universeMode,
         'createdAt': createdAt.toIso8601String(),
         'updatedAt': updatedAt.toIso8601String(),
       };
@@ -55,6 +63,7 @@ class StrategyConfigModel {
         params: Map<String, dynamic>.from(json['params'] as Map),
         securityIds:
             (json['securityIds'] as List<dynamic>).map((e) => e as int).toList(),
+        universeMode: json['universeMode'] as String? ?? 'static',
         createdAt: DateTime.parse(json['createdAt'] as String),
         updatedAt: DateTime.parse(json['updatedAt'] as String),
       );
@@ -67,6 +76,7 @@ class StrategyConfigModel {
     int? reminderMinutesBefore,
     Map<String, dynamic>? params,
     List<int>? securityIds,
+    String? universeMode,
   }) =>
       StrategyConfigModel(
         id: id,
@@ -79,6 +89,7 @@ class StrategyConfigModel {
             reminderMinutesBefore ?? this.reminderMinutesBefore,
         params: params ?? Map<String, dynamic>.from(this.params),
         securityIds: securityIds ?? List<int>.from(this.securityIds),
+        universeMode: universeMode ?? this.universeMode,
         createdAt: createdAt,
         updatedAt: DateTime.now(),
       );

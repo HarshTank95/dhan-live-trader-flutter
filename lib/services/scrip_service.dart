@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../data/nifty500_stocks.dart';
 import 'app_logger.dart';
+import 'universe_history_service.dart';
 
 // ── Segment enum ─────────────────────────────────────────────────────────────
 
@@ -220,6 +221,7 @@ class ScripService {
 
   // Cached index symbols fetched from niftyindices.com
   Set<String> _nifty50Symbols = {};
+  Set<String> _nifty100Symbols = {};
   Set<String> _nifty200Symbols = {};
   Set<String> _nifty500Symbols = {};
   bool _indexSymbolsLoaded = false;
@@ -239,10 +241,12 @@ class ScripService {
     // Try loading from cache first
     if (cachedDate == today) {
       final cached50 = prefs.getStringList('nifty50_symbols');
+      final cached100 = prefs.getStringList('nifty100_symbols');
       final cached200 = prefs.getStringList('nifty200_symbols');
       final cached500 = prefs.getStringList('nifty500_symbols');
       if (cached500 != null && cached500.isNotEmpty) {
         _nifty50Symbols = cached50?.toSet() ?? {};
+        _nifty100Symbols = cached100?.toSet() ?? {};
         _nifty200Symbols = cached200?.toSet() ?? {};
         _nifty500Symbols = cached500.toSet();
         _indexSymbolsLoaded = true;
@@ -256,19 +260,32 @@ class ScripService {
         _fetchIndexCsv('ind_nifty50list.csv'),
         _fetchIndexCsv('ind_nifty200list.csv'),
         _fetchIndexCsv('ind_nifty500list.csv'),
+        _fetchIndexCsv('ind_nifty100list.csv'),
       ]);
 
       if (results[2].isNotEmpty) {
         _nifty50Symbols = results[0];
         _nifty200Symbols = results[1];
         _nifty500Symbols = results[2];
+        _nifty100Symbols = results[3];
         _indexSymbolsLoaded = true;
 
         // Cache for the day
         await prefs.setStringList('nifty50_symbols', _nifty50Symbols.toList());
         await prefs.setStringList('nifty200_symbols', _nifty200Symbols.toList());
         await prefs.setStringList('nifty500_symbols', _nifty500Symbols.toList());
+        await prefs.setStringList('nifty100_symbols', _nifty100Symbols.toList());
         await prefs.setString(_indexCacheKey, today);
+
+        // Self-record point-in-time history: append a dated snapshot for any
+        // index whose membership changed since the last known snapshot. This
+        // is how the app archives every future index review automatically.
+        await UniverseHistory.recordCurrent({
+          'nifty50': _nifty50Symbols,
+          'nifty100': _nifty100Symbols,
+          'nifty200': _nifty200Symbols,
+          'nifty500': _nifty500Symbols,
+        });
 
         return;
       }
@@ -322,6 +339,9 @@ class ScripService {
       case 'Nifty 50':
         indexSymbols = _nifty50Symbols.isNotEmpty ? _nifty50Symbols : Nifty500Stocks.symbols;
         break;
+      case 'Nifty 100':
+        indexSymbols = _nifty100Symbols.isNotEmpty ? _nifty100Symbols : Nifty500Stocks.symbols;
+        break;
       case 'Nifty 200':
         indexSymbols = _nifty200Symbols.isNotEmpty ? _nifty200Symbols : Nifty500Stocks.symbols;
         break;
@@ -348,6 +368,19 @@ class ScripService {
     }
 
     return matched.map((s) => s.securityId).toList();
+  }
+
+  /// Resolve a set of NSE trading symbols to Dhan security IDs against the
+  /// loaded scrip master. Symbols that don't resolve (delisted historical
+  /// members) are simply absent from the result — callers log the delta.
+  Map<String, int> resolveSymbols(Set<String> symbols) {
+    final upper = symbols.map((s) => s.toUpperCase()).toSet();
+    final out = <String, int>{};
+    for (final s in _scrips) {
+      final sym = s.symbol.toUpperCase();
+      if (upper.contains(sym)) out[sym] = s.securityId;
+    }
+    return out;
   }
 
   /// Legacy method — kept for backward compatibility.

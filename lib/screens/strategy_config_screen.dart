@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import '../models/strategy_config_model.dart';
 import '../services/scrip_service.dart';
 import '../services/strategy_reminder_service.dart';
+import '../services/universe_history_service.dart';
+import '../theme/app_theme.dart';
 import '../strategies/base_strategy.dart';
 import '../strategies/strategy_registry.dart';
 
@@ -204,6 +206,63 @@ class _StrategyConfigScreenState extends State<StrategyConfigScreen> {
           _buildReminderCard(),
           const SizedBox(height: 8),
 
+          // Universe mode — static list vs point-in-time index membership
+          Card(
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+              child: Row(
+                children: [
+                  const Icon(Icons.history_toggle_off,
+                      color: AppColors.textMuted, size: 22),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Universe Mode',
+                            style: TextStyle(
+                                fontWeight: FontWeight.w600, fontSize: 14)),
+                        const SizedBox(height: 2),
+                        Text(
+                          _config.universeMode == UniverseHistory.modeStatic
+                              ? 'Fixed stock list (has survivorship bias in backtests)'
+                              : 'Backtests scan the index members as of each date; live scans current members',
+                          style: const TextStyle(
+                              fontSize: 11.5, color: AppColors.textMuted),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  DropdownButton<String>(
+                    value: _config.universeMode,
+                    underline: const SizedBox.shrink(),
+                    style: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.textPrimary),
+                    items: [
+                      for (final m in UniverseHistory.modes)
+                        DropdownMenuItem(
+                          value: m,
+                          child: Text(
+                            m == UniverseHistory.modeStatic
+                                ? 'Static'
+                                : UniverseHistory.universeLabel(m),
+                          ),
+                        ),
+                    ],
+                    onChanged: (v) =>
+                        setState(() => _config.universeMode = v ?? 'static'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+
           // Stock universe count
           Card(
             shape:
@@ -213,7 +272,9 @@ class _StrategyConfigScreenState extends State<StrategyConfigScreen> {
               title: const Text('Stock Universe',
                   style: TextStyle(fontWeight: FontWeight.w600)),
               subtitle: Text(
-                  '${_config.securityIds.length} stocks selected'),
+                  _config.universeMode == UniverseHistory.modeStatic
+                      ? '${_config.securityIds.length} stocks selected'
+                      : 'Ignored — universe comes from ${UniverseHistory.universeLabel(_config.universeMode)} membership'),
               trailing: const Icon(Icons.chevron_right),
               onTap: () {
                 // Show which stocks are in the universe
