@@ -706,7 +706,27 @@ Future<void> onStart(ServiceInstance service) async {
   // ── STEP 3: Handle START command from UI ──
   StrategyEngine? engine;
 
+  // ── Idle watchdog ──
+  // The plugin's native watchdog revives a service that died WITHOUT an
+  // explicit stopSelf() (system kill, force-stop). The revived isolate has no
+  // engine — nobody sent start_strategy — and previously sat forever showing
+  // "Initializing...". A real Run sends start_strategy within ~1s of service
+  // start, so if nothing arrives inside the grace window, shut down cleanly
+  // (stopSelf also clears the plugin's respawn state). A dead strategy can't
+  // be resumed by a revived isolate anyway, so nothing is lost.
+  Timer? idleWatchdog;
+  idleWatchdog = Timer(const Duration(seconds: 25), () async {
+    if (engine != null) return;
+    debugPrint(
+        '[BgIsolate] Idle watchdog: no strategy started within 25s — stopping service');
+    try {
+      await FlutterLocalNotificationsPlugin().cancel(888);
+    } catch (_) {}
+    service.stopSelf();
+  });
+
   service.on('start_strategy').listen((event) async {
+    idleWatchdog?.cancel();
     debugPrint('[BgIsolate] start_strategy event received: $event');
     if (event == null) {
       debugPrint('[BgIsolate] start_strategy event is NULL, ignoring');
@@ -821,6 +841,7 @@ Future<void> onStart(ServiceInstance service) async {
 
   // ── STEP 4: Handle STOP command from UI ──
   service.on('stop').listen((_) async {
+    idleWatchdog?.cancel();
     debugPrint('[BgIsolate] STOP command received');
 
     // Stop the strategy engine if running
