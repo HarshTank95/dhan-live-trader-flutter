@@ -126,6 +126,14 @@ class DhanFeedService {
 
   void _doConnect() {
     if (_disposed) return;
+    // Nothing to subscribe (empty watchlist): don't open a socket at all.
+    // Dhan closes idle no-subscription connections, which turned this into a
+    // 5s reconnect loop. Park disconnected; the next resubscribe() with a
+    // non-empty list connects normally.
+    if (_ids.isEmpty) {
+      _emitStatus(FeedStatus.disconnected);
+      return;
+    }
     _emitStatus(FeedStatus.connecting);
     try {
       final uri = Uri.parse(

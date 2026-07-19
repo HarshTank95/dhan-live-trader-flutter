@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../main.dart';
 import '../models/watchlist_model.dart';
 import '../services/dhan_feed_service.dart';
@@ -8,6 +9,7 @@ import '../services/dhan_service.dart'
 import '../services/scrip_service.dart';
 import '../services/paper_trading_service.dart';
 import '../services/storage_service.dart';
+import '../services/strategy_background_service.dart';
 import '../theme/app_theme.dart';
 import 'chart_screen.dart';
 import 'holdings_screen.dart';
@@ -66,6 +68,10 @@ class _LtpScreenState extends State<LtpScreen> {
   // Price tick flash — securityId → latest tick (row pulses green/red on LTP change)
   final Map<int, _FlashTick> _flashes = {};
   int _flashSeq = 0;
+
+  // Watchlist-switch slide direction: +1 = content enters from the right
+  // (moved to a later tab), -1 = from the left. Drives the body transition.
+  double _switchDir = 0;
 
   WatchlistModel? get _activeWatchlist {
     try {
@@ -200,17 +206,27 @@ class _LtpScreenState extends State<LtpScreen> {
 
   Future<void> _selectWatchlist(String id) async {
     if (_activeWatchlistId == id) return;
+    final oldIdx = _watchlists.indexWhere((w) => w.id == _activeWatchlistId);
+    final newIdx = _watchlists.indexWhere((w) => w.id == id);
     setState(() {
+      _switchDir = newIdx >= oldIdx ? 1 : -1;
       _activeWatchlistId = id;
       _isLoading = true;
       _quotes = [];
     });
     await StorageService.saveActiveWatchlistId(id);
     _applyActiveWatchlist();
-    // Load prevCloses for new watchlist in background (needed by pull-to-refresh)
-    unawaited(_service.loadPrevCloses());
-    // Resubscribe WebSocket with new instrument list
-    _feedService?.resubscribe(_getActiveSecurityIds());
+    final ids = _getActiveSecurityIds();
+    if (ids.isEmpty) {
+      // Empty watchlist: no data will ever arrive to clear the spinner —
+      // show the empty-state immediately instead of "Fetching live prices...".
+      setState(() => _isLoading = false);
+    } else {
+      // Load prevCloses for new watchlist in background (needed by pull-to-refresh)
+      unawaited(_service.loadPrevCloses());
+    }
+    // Resubscribe WebSocket with new instrument list (feed parks on empty)
+    _feedService?.resubscribe(ids);
   }
 
   Future<void> _fetchLTP() async {
@@ -301,8 +317,13 @@ class _LtpScreenState extends State<LtpScreen> {
         _quotes = [];
       });
       _applyActiveWatchlist();
-      unawaited(_service.loadPrevCloses());
-      _feedService?.resubscribe(_getActiveSecurityIds());
+      final ids = _getActiveSecurityIds();
+      if (ids.isEmpty) {
+        setState(() => _isLoading = false); // empty list → empty-state, no spinner
+      } else {
+        unawaited(_service.loadPrevCloses());
+      }
+      _feedService?.resubscribe(ids);
     }
   }
 
@@ -364,6 +385,46 @@ class _LtpScreenState extends State<LtpScreen> {
       MaterialPageRoute(builder: (_) => const TokenEntryScreen()),
       (_) => false,
     );
+  }
+
+  /// Stop the strategy background service (confirming first if it's actually
+  /// running) and close the app. Without this, the foreground service — and
+  /// its ongoing notification — can outlive the UI indefinitely.
+  Future<void> _exitApp() async {
+    Navigator.pop(context); // close drawer
+    final running = await StrategyBackgroundService.isRunning();
+    if (!mounted) return;
+
+    if (running) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Exit App?'),
+          content: const Text(
+            'The strategy background service is running. '
+            'Exiting will stop it and close the app.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: AppColors.down),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Stop & Exit'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+      await StrategyBackgroundService.stopService();
+      // Give the isolate a moment to cancel its notification and stopSelf().
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+
+    _feedService?.dispose();
+    SystemNavigator.pop();
   }
 
   Future<void> _fetchFunds() async {
@@ -717,9 +778,34 @@ class _LtpScreenState extends State<LtpScreen> {
           _buildSearchRow(),
           _buildWatchlistTabs(),
           Expanded(
-            child: RefreshIndicator(
-              onRefresh: _fetchLTP,
-              child: _buildBody(),
+            // Kite-style horizontal swipe anywhere in the list area switches
+            // watchlists (left = next tab, right = previous).
+            child: GestureDetector(
+              onHorizontalDragEnd: _onHorizontalSwipe,
+              child: RefreshIndicator(
+                onRefresh: _fetchLTP,
+                // Direction-aware fade+slide so switching lists feels like a
+                // page change, not a hard content swap.
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 240),
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeInCubic,
+                  transitionBuilder: (child, anim) => FadeTransition(
+                    opacity: anim,
+                    child: SlideTransition(
+                      position: Tween<Offset>(
+                        begin: Offset(0.08 * _switchDir, 0),
+                        end: Offset.zero,
+                      ).animate(anim),
+                      child: child,
+                    ),
+                  ),
+                  child: KeyedSubtree(
+                    key: ValueKey(_activeWatchlistId),
+                    child: _buildBody(),
+                  ),
+                ),
+              ),
             ),
           ),
         ],
@@ -865,6 +951,17 @@ class _LtpScreenState extends State<LtpScreen> {
         ),
       ),
     );
+  }
+
+  void _onHorizontalSwipe(DragEndDetails d) {
+    final v = d.primaryVelocity ?? 0;
+    if (v.abs() < 250) return; // ignore slow/ambiguous drags
+    final idx = _watchlists.indexWhere((w) => w.id == _activeWatchlistId);
+    if (idx < 0) return;
+    final next = v < 0 ? idx + 1 : idx - 1; // swipe left → next tab
+    if (next < 0 || next >= _watchlists.length) return; // no wrap-around
+    HapticFeedback.selectionClick();
+    _selectWatchlist(_watchlists[next].id);
   }
 
   Widget _buildWatchlistTabs() {
@@ -1158,6 +1255,12 @@ class _LtpScreenState extends State<LtpScreen> {
                   labelColor: AppColors.down,
                   onTap: _logout,
                 ),
+                _drawerTile(
+                  icon: Icons.power_settings_new_rounded,
+                  label: 'Exit App',
+                  iconColor: AppColors.textMuted,
+                  onTap: _exitApp,
+                ),
 
                 const SizedBox(height: 8),
 
@@ -1382,9 +1485,9 @@ class _LtpScreenState extends State<LtpScreen> {
             const Text('This watchlist is empty',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
-            const Text('Open the drawer → Manage Watchlists to add stocks',
+            const Text('Use the search bar above to add stocks',
                 textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey)),
+                style: TextStyle(color: AppColors.textMuted)),
           ],
         ),
       );
@@ -1479,17 +1582,43 @@ class _MarketStatusPillState extends State<_MarketStatusPill>
     duration: const Duration(milliseconds: 1200),
   )..repeat(reverse: true);
 
+  // Debounced status: watchlist switches reconnect the feed, producing a
+  // sub-second `connecting` blip. Only surface SYNC if connecting PERSISTS
+  // (real outage); connected/disconnected show immediately.
+  late FeedStatus _shown = widget.feedStatus;
+  Timer? _pendingConnecting;
+
+  @override
+  void didUpdateWidget(_MarketStatusPill old) {
+    super.didUpdateWidget(old);
+    if (widget.feedStatus == _shown) {
+      _pendingConnecting?.cancel();
+      return;
+    }
+    if (widget.feedStatus == FeedStatus.connecting) {
+      _pendingConnecting?.cancel();
+      _pendingConnecting = Timer(const Duration(milliseconds: 700), () {
+        if (mounted && widget.feedStatus == FeedStatus.connecting) {
+          setState(() => _shown = FeedStatus.connecting);
+        }
+      });
+    } else {
+      _pendingConnecting?.cancel();
+      setState(() => _shown = widget.feedStatus);
+    }
+  }
+
   @override
   void dispose() {
+    _pendingConnecting?.cancel();
     _pulse.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final live =
-        widget.feedStatus == FeedStatus.connected && widget.marketOpen;
-    final (color, label) = switch (widget.feedStatus) {
+    final live = _shown == FeedStatus.connected && widget.marketOpen;
+    final (color, label) = switch (_shown) {
       FeedStatus.connected =>
         live ? (AppColors.accent, 'LIVE') : (AppColors.textFaint, 'CLOSED'),
       FeedStatus.connecting => (AppColors.warn, 'SYNC'),
