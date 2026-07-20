@@ -2206,6 +2206,10 @@ class OrbStrategy extends BaseStrategy {
         'message': msg,
         'phase': 4,
         'activeStocks': setups.length,
+        // Status-line refresh, not an event — the activity feed skips
+        // transient updates (60+ near-identical heartbeat rows were
+        // drowning the real entries/exits).
+        'transient': true,
       });
     }
 

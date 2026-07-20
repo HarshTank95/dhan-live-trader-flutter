@@ -57,6 +57,78 @@ class StrategySessionCandidate {
       );
 }
 
+/// A trade taken during the current run — built centrally from trade_update
+/// events so EVERY strategy (dominance, hammer, ORB…) gets live position
+/// cards and a correct Trades count on the dashboard without persisting
+/// anything mid-run itself.
+class StrategySessionTrade {
+  final String symbol;
+  final int quantity;
+  final double entryPrice;
+  final double stopLoss;
+  final double exitPrice;
+  final double pnl;
+  final String status; // 'open' | 'sl_hit' | 'target_hit' | 'eod_exit'
+  final DateTime entryTime;
+  final DateTime? exitTime;
+
+  const StrategySessionTrade({
+    required this.symbol,
+    required this.quantity,
+    required this.entryPrice,
+    required this.stopLoss,
+    this.exitPrice = 0,
+    this.pnl = 0,
+    this.status = 'open',
+    required this.entryTime,
+    this.exitTime,
+  });
+
+  bool get isOpen => status == 'open';
+
+  StrategySessionTrade close(
+          {required double exitPrice,
+          required double pnl,
+          required String status}) =>
+      StrategySessionTrade(
+        symbol: symbol,
+        quantity: quantity,
+        entryPrice: entryPrice,
+        stopLoss: stopLoss,
+        exitPrice: exitPrice,
+        pnl: pnl,
+        status: status,
+        entryTime: entryTime,
+        exitTime: DateTime.now(),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'symbol': symbol,
+        'quantity': quantity,
+        'entryPrice': entryPrice,
+        'stopLoss': stopLoss,
+        'exitPrice': exitPrice,
+        'pnl': pnl,
+        'status': status,
+        'entryTime': entryTime.toIso8601String(),
+        'exitTime': exitTime?.toIso8601String(),
+      };
+
+  factory StrategySessionTrade.fromJson(Map<String, dynamic> m) =>
+      StrategySessionTrade(
+        symbol: m['symbol'] as String? ?? '',
+        quantity: (m['quantity'] as num?)?.toInt() ?? 0,
+        entryPrice: (m['entryPrice'] as num?)?.toDouble() ?? 0,
+        stopLoss: (m['stopLoss'] as num?)?.toDouble() ?? 0,
+        exitPrice: (m['exitPrice'] as num?)?.toDouble() ?? 0,
+        pnl: (m['pnl'] as num?)?.toDouble() ?? 0,
+        status: m['status'] as String? ?? 'open',
+        entryTime: DateTime.tryParse(m['entryTime'] as String? ?? '') ??
+            DateTime.now(),
+        exitTime: DateTime.tryParse(m['exitTime'] as String? ?? ''),
+      );
+}
+
 /// Live snapshot of the running strategy's UI-relevant state. The dashboard
 /// seeds itself from this on init so widget rebuilds / re-entries don't wipe
 /// the phase indicator, status message, progress, candidates, etc.
@@ -68,6 +140,7 @@ class StrategySessionState {
   int candidateCount;
   int activeStocks;
   List<StrategySessionCandidate> candidates;
+  List<StrategySessionTrade> trades;
 
   StrategySessionState({
     this.configId,
@@ -77,7 +150,9 @@ class StrategySessionState {
     this.candidateCount = 0,
     this.activeStocks = 0,
     List<StrategySessionCandidate>? candidates,
-  }) : candidates = candidates ?? [];
+    List<StrategySessionTrade>? trades,
+  })  : candidates = candidates ?? [],
+        trades = trades ?? [];
 
   StrategySessionState clone() => StrategySessionState(
         configId: configId,
@@ -87,6 +162,7 @@ class StrategySessionState {
         candidateCount: candidateCount,
         activeStocks: activeStocks,
         candidates: List<StrategySessionCandidate>.from(candidates),
+        trades: List<StrategySessionTrade>.from(trades),
       );
 }
 
@@ -248,6 +324,10 @@ class StrategyBackgroundService {
                   status: cm['status'] as String? ?? 'Watching',
                 );
               })
+              .toList()
+          ..trades = ((m['trades'] as List?) ?? [])
+              .map((t) => StrategySessionTrade.fromJson(
+                  Map<String, dynamic>.from(t as Map)))
               .toList();
       }
       _log('BgService',
@@ -301,6 +381,8 @@ class StrategyBackgroundService {
                 })
             .toList(),
       };
+      sessionMap['trades'] =
+          _session.trades.map((t) => t.toJson()).toList();
       await prefs.setString(_kSessionKey, jsonEncode(sessionMap));
     } catch (e) {
       debugPrint('[BgService] Flush to disk failed: $e');
@@ -339,6 +421,9 @@ class StrategyBackgroundService {
       final candidates = event['candidates'] as int?;
       final activeStocks = event['activeStocks'] as int?;
       final cidRaw = event['configId'] as String?;
+      // Transient = status-line refresh (e.g. the ORB heartbeat) — updates
+      // the session snapshot but must NOT append an activity row.
+      final transient = event['transient'] == true;
 
       // Every 'running' event marks a fresh run — wipe activity + session so
       // the dashboard starts clean (matches the local clear on Start).
@@ -352,13 +437,16 @@ class StrategyBackgroundService {
           ..progress = 0
           ..candidateCount = 0
           ..activeStocks = 0
-          ..candidates = [];
+          ..candidates = []
+          ..trades = [];
       }
 
       if (message.isNotEmpty) _session.statusMessage = message;
       if (progress != null) _session.progress = progress;
       if (candidates != null) _session.candidateCount = candidates;
       if (activeStocks != null) _session.activeStocks = activeStocks;
+      final phaseHint = event['phase'] as int?;
+      if (phaseHint != null) _session.currentPhase = phaseHint;
 
       if (message.contains('Fetching') || message.contains('Waiting for')) {
         _session.currentPhase = 3;
@@ -371,6 +459,11 @@ class StrategyBackgroundService {
       if (status == 'stopped' || status == 'completed') {
         _session.progress = 0;
         _session.currentPhase = status == 'completed' ? 5 : 0;
+      }
+
+      if (transient) {
+        _scheduleFlush();
+        return;
       }
 
       if (message.isNotEmpty) {
@@ -418,6 +511,32 @@ class StrategyBackgroundService {
       final type = event['type'] as String? ?? '';
       final symbol = event['symbol'] as String? ?? '';
       final isPaper = event['isPaper'] as bool? ?? true;
+
+      // Maintain the session trades list — the dashboard's position cards
+      // and Trades count come from here, for every strategy shape.
+      if (type == 'entry') {
+        _session.trades.add(StrategySessionTrade(
+          symbol: symbol,
+          quantity: (event['quantity'] as num?)?.toInt() ?? 0,
+          entryPrice: (event['entryPrice'] as num?)?.toDouble() ?? 0,
+          stopLoss: (event['stopLoss'] as num?)?.toDouble() ?? 0,
+          entryTime: DateTime.now(),
+        ));
+      } else if (type == 'sl_hit' ||
+          type == 'target_hit' ||
+          type == 'eod_exit') {
+        for (int i = _session.trades.length - 1; i >= 0; i--) {
+          final t = _session.trades[i];
+          if (t.symbol == symbol && t.isOpen) {
+            _session.trades[i] = t.close(
+              exitPrice: (event['exitPrice'] as num?)?.toDouble() ?? 0,
+              pnl: (event['pnl'] as num?)?.toDouble() ?? 0,
+              status: type,
+            );
+            break;
+          }
+        }
+      }
 
       // Mark the matching candidate as 'Traded' on entry.
       if (type == 'entry') {

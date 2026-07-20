@@ -4,6 +4,7 @@ import '../models/strategy_config_model.dart';
 import '../models/strategy_trade_model.dart';
 import '../services/storage_service.dart';
 import '../services/strategy_background_service.dart';
+import '../theme/app_theme.dart';
 import 'strategy_history_screen.dart';
 
 class StrategyDashboardScreen extends StatefulWidget {
@@ -41,8 +42,12 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
   final List<_ActivityEntry> _activity = [];
   final ScrollController _activityScrollCtrl = ScrollController();
 
-  // Trades
+  // Trades persisted by the engine (storage; end-of-run for some strategies)
   List<StrategyTradeModel> _trades = [];
+
+  // Live session trades — maintained centrally from trade_update events, so
+  // position cards appear the moment ANY strategy enters a trade.
+  List<StrategySessionTrade> _sessionTrades = [];
 
   final List<StreamSubscription> _subs = [];
 
@@ -72,6 +77,7 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
       _progress = s.progress;
       _candidateCount = s.candidateCount;
       _activeStocks = s.activeStocks;
+      _sessionTrades = s.trades;
       _candidates
         ..clear()
         ..addAll(s.candidates.map((c) => _CandidateInfo(
@@ -90,28 +96,28 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
     switch (r.type) {
       case 'signal':
         icon = Icons.candlestick_chart;
-        color = Colors.orange;
+        color = AppColors.warn;
       case 'trade_entry':
         icon = Icons.arrow_upward;
-        color = Colors.green;
+        color = AppColors.up;
       case 'trade_sl_hit':
         icon = Icons.arrow_downward;
-        color = Colors.red;
+        color = AppColors.down;
       case 'trade_target_hit':
         icon = Icons.star;
-        color = Colors.green;
+        color = AppColors.up;
       case 'trade_eod_exit':
         icon = Icons.schedule;
-        color = Colors.orange;
+        color = AppColors.warn;
       case 'completed':
         icon = Icons.check_circle;
-        color = Colors.blue;
+        color = AppColors.accent;
       case 'error':
-        icon = Icons.error;
-        color = Colors.red;
+        icon = Icons.error_outline;
+        color = AppColors.down;
       default:
         icon = Icons.info_outline;
-        color = Colors.blue;
+        color = AppColors.textFaint;
     }
     _activity.insert(0, _ActivityEntry(
       icon: icon,
@@ -284,17 +290,22 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
       final type = event['type'] as String? ?? '';
       final symbol = event['symbol'] as String? ?? '';
 
-      if (type == 'entry') {
-        setState(() {
+      setState(() {
+        // Session trades are maintained centrally (bg service wires first) —
+        // re-pull the snapshot so position cards update live.
+        _sessionTrades =
+            StrategyBackgroundService.sessionFor(widget.config.id).trades;
+        if (type == 'entry') {
           // Mark candidate as traded
           for (int i = 0; i < _candidates.length; i++) {
-            if (_candidates[i].symbol == symbol && _candidates[i].status == 'Watching') {
+            if (_candidates[i].symbol == symbol &&
+                _candidates[i].status == 'Watching') {
               _candidates[i] = _candidates[i].copyWith(status: 'Traded');
               break;
             }
           }
-        });
-      }
+        }
+      });
 
       _loadTrades();
     }));
@@ -347,6 +358,7 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
           _statusMessage = 'Starting...';
           _activity.clear();
           _candidates.clear();
+          _sessionTrades = [];
           _candidateCount = 0;
           _activeStocks = 0;
           _progress = 0;
@@ -372,14 +384,20 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
   @override
   Widget build(BuildContext context) {
     final mode = widget.config.paperTrading ? 'Paper' : 'Live';
+    final sessionPnl = _sessionTrades.fold<double>(0, (a, t) => a + t.pnl);
+    final tradeCount =
+        _sessionTrades.isNotEmpty ? _sessionTrades.length : _trades.length;
+    final tradesPnl = _sessionTrades.isNotEmpty
+        ? sessionPnl
+        : _trades.fold<double>(0, (s, t) => s + t.pnl);
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.config.name),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        title: Text(widget.config.name,
+            maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
           IconButton(
-            icon: const Icon(Icons.history),
+            icon: const Icon(Icons.history, size: 22),
             tooltip: 'Run History',
             onPressed: () => Navigator.push(
               context,
@@ -389,26 +407,32 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
             ),
           ),
           Container(
-            margin: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            margin: const EdgeInsets.symmetric(vertical: 14, horizontal: 4),
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
             decoration: BoxDecoration(
-              color: widget.config.paperTrading
-                  ? Colors.orange.withValues(alpha: 0.15)
-                  : Colors.green.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(20),
+              borderRadius: BorderRadius.circular(8),
               border: Border.all(
-                color: widget.config.paperTrading ? Colors.orange : Colors.green,
+                color: widget.config.paperTrading
+                    ? const Color(0x24FFFFFF)
+                    : AppColors.warn.withValues(alpha: 0.5),
               ),
+              color: widget.config.paperTrading
+                  ? Colors.transparent
+                  : AppColors.warn.withValues(alpha: 0.08),
             ),
             child: Text(
-              mode,
+              mode.toUpperCase(),
               style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: widget.config.paperTrading ? Colors.orange : Colors.green,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.1,
+                color: widget.config.paperTrading
+                    ? AppColors.textMuted
+                    : AppColors.warn,
               ),
             ),
           ),
+          const SizedBox(width: 12),
         ],
       ),
       body: Column(
@@ -416,27 +440,22 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
           // ── Header with START/STOP ────────────────────────────────
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: _isRunning
-                    ? [const Color(0xFF2E7D32), const Color(0xFF66BB6A)]
-                    : [const Color(0xFF1565C0), const Color(0xFF42A5F5)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+            decoration: const BoxDecoration(
+              color: AppColors.surface,
+              border: Border(bottom: BorderSide(color: AppColors.hairline)),
             ),
             child: Column(
               children: [
-                // Status
+                // Status line
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     if (_isRunning) ...[
                       const SizedBox(
-                        width: 16, height: 16,
+                        width: 13, height: 13,
                         child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white,
+                          strokeWidth: 2, color: AppColors.accent,
                         ),
                       ),
                       const SizedBox(width: 10),
@@ -444,7 +463,11 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
                     Flexible(
                       child: Text(
                         _statusMessage,
-                        style: const TextStyle(color: Colors.white, fontSize: 14),
+                        style: const TextStyle(
+                            color: AppColors.textPrimary,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                            fontFeatures: [FontFeature.tabularFigures()]),
                         textAlign: TextAlign.center,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
@@ -454,41 +477,45 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
                 ),
 
                 if (_isRunning && _progress > 0) ...[
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 10),
                   ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
+                    borderRadius: BorderRadius.circular(3),
                     child: LinearProgressIndicator(
                       value: _progress / 100,
-                      backgroundColor: Colors.white24,
-                      valueColor: const AlwaysStoppedAnimation(Colors.white),
-                      minHeight: 6,
+                      backgroundColor: AppColors.surfaceRaised,
+                      valueColor:
+                          const AlwaysStoppedAnimation(AppColors.accent),
+                      minHeight: 4,
                     ),
                   ),
                 ],
 
-                const SizedBox(height: 14),
+                const SizedBox(height: 12),
 
                 // START / STOP button
                 SizedBox(
-                  width: 180,
-                  height: 48,
-                  child: ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _isRunning ? Colors.red : Colors.white,
-                      foregroundColor: _isRunning ? Colors.white : Colors.blue,
+                  width: 170,
+                  height: 42,
+                  child: FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor:
+                          _isRunning ? AppColors.down : AppColors.accent,
+                      foregroundColor: const Color(0xFF0B0D10),
                       shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(25),
+                        borderRadius: BorderRadius.circular(12),
                       ),
-                      elevation: 4,
                     ),
                     onPressed: _toggleStrategy,
                     icon: Icon(
                       _isRunning ? Icons.stop_rounded : Icons.play_arrow_rounded,
-                      size: 24,
+                      size: 20,
                     ),
                     label: Text(
                       _isRunning ? 'STOP' : 'START',
-                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                      style: const TextStyle(
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2),
                     ),
                   ),
                 ),
@@ -504,13 +531,26 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
             padding: const EdgeInsets.all(12),
             child: Row(
               children: [
-                _infoChip('Stocks', '${widget.config.securityIds.length}', Colors.blue),
+                _infoChip('Stocks', '${widget.config.securityIds.length}',
+                    AppColors.textPrimary),
                 const SizedBox(width: 6),
-                _infoChip('Active', '$_activeStocks', Colors.teal),
+                _infoChip('Active', '$_activeStocks', AppColors.textPrimary),
                 const SizedBox(width: 6),
-                _infoChip('Candidates', '$_candidateCount', Colors.orange),
+                _infoChip(
+                    'Candidates',
+                    '$_candidateCount',
+                    _candidateCount > 0
+                        ? AppColors.warn
+                        : AppColors.textPrimary),
                 const SizedBox(width: 6),
-                _infoChip('Trades', '${_trades.length}', Colors.green),
+                _infoChip(
+                    'Trades',
+                    '$tradeCount',
+                    tradeCount == 0
+                        ? AppColors.textPrimary
+                        : tradesPnl >= 0
+                            ? AppColors.up
+                            : AppColors.down),
               ],
             ),
           ),
@@ -523,12 +563,16 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
               child: Row(
                 children: [
-                  const Icon(Icons.candlestick_chart, size: 18, color: Colors.orange),
+                  const Icon(Icons.candlestick_chart,
+                      size: 16, color: AppColors.textMuted),
                   const SizedBox(width: 6),
-                  const Text('Candidates', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                  const Text('Candidates',
+                      style:
+                          TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
                   const Spacer(),
                   Text('${_candidates.length} found',
-                      style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                      style: const TextStyle(
+                          fontSize: 11.5, color: AppColors.textFaint)),
                 ],
               ),
             ),
@@ -544,23 +588,30 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
             const Divider(height: 1),
           ],
 
-          // ── Trades section (if any) ──────────────────────────────
-          if (_trades.isNotEmpty) ...[
+          // ── Positions (live session trades, any strategy shape) ──────
+          if (_sessionTrades.isNotEmpty || _trades.isNotEmpty) ...[
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
               child: Row(
                 children: [
-                  const Icon(Icons.receipt_long, size: 18, color: Colors.grey),
+                  const Icon(Icons.work_outline,
+                      size: 16, color: AppColors.textMuted),
                   const SizedBox(width: 6),
-                  const Text('Trades', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                  const Text('Positions',
+                      style: TextStyle(
+                          fontWeight: FontWeight.w600, fontSize: 13)),
                   const Spacer(),
                   Text(
-                    'P&L: Rs ${_trades.fold<double>(0, (sum, t) => sum + t.pnl).toStringAsFixed(0)}',
+                    '${tradesPnl >= 0 ? '+' : '-'}₹${AppFmt.inr(tradesPnl.abs())}',
                     style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: _trades.fold<double>(0, (sum, t) => sum + t.pnl) >= 0
-                          ? Colors.green
-                          : Colors.red,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                      color: tradesPnl > 0
+                          ? AppColors.up
+                          : tradesPnl < 0
+                              ? AppColors.down
+                              : AppColors.textMuted,
                     ),
                   ),
                 ],
@@ -568,56 +619,21 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
             ),
             SizedBox(
               height: 96,
-              child: ListView.builder(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                itemCount: _trades.length,
-                itemBuilder: (context, i) {
-                  final trade = _trades[i];
-                  final isWin = trade.pnl > 0;
-                  return Container(
-                    width: 150,
-                    margin: const EdgeInsets.only(right: 8),
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: (isWin ? Colors.green : Colors.red).withValues(alpha: 0.08),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: (isWin ? Colors.green : Colors.red).withValues(alpha: 0.3),
-                      ),
+              child: _sessionTrades.isNotEmpty
+                  ? ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                      itemCount: _sessionTrades.length,
+                      itemBuilder: (context, i) =>
+                          _sessionTradeCard(_sessionTrades[i]),
+                    )
+                  : ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                      itemCount: _trades.length,
+                      itemBuilder: (context, i) =>
+                          _storedTradeCard(_trades[i]),
                     ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Row(
-                          children: [
-                            Icon(isWin ? Icons.trending_up : Icons.trending_down,
-                                size: 14, color: isWin ? Colors.green : Colors.red),
-                            const SizedBox(width: 4),
-                            Expanded(
-                              child: Text(trade.symbol,
-                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
-                                  overflow: TextOverflow.ellipsis),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Text('Qty: ${trade.quantity} @ ${trade.entryPrice.toStringAsFixed(1)}',
-                            style: const TextStyle(fontSize: 10, color: Colors.grey)),
-                        Text(
-                          'P&L: Rs ${trade.pnl.toStringAsFixed(0)}',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                            color: isWin ? Colors.green : Colors.red,
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
             ),
             const Divider(height: 1),
           ],
@@ -627,12 +643,16 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
             padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
             child: Row(
               children: [
-                const Icon(Icons.list_alt, size: 18, color: Colors.grey),
+                const Icon(Icons.list_alt,
+                    size: 16, color: AppColors.textMuted),
                 const SizedBox(width: 6),
-                const Text('Activity', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                const Text('Activity',
+                    style:
+                        TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
                 const Spacer(),
                 Text('${_activity.length} events',
-                    style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                    style: const TextStyle(
+                        fontSize: 11.5, color: AppColors.textFaint)),
               ],
             ),
           ),
@@ -642,13 +662,16 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.auto_graph, size: 48, color: Colors.grey.shade300),
+                        const Icon(Icons.auto_graph,
+                            size: 48, color: AppColors.textFaint),
                         const SizedBox(height: 12),
-                        const Text('Press START to begin', style: TextStyle(color: Colors.grey)),
+                        const Text('Press START to begin',
+                            style: TextStyle(color: AppColors.textMuted)),
                         const SizedBox(height: 4),
-                        Text(
+                        const Text(
                           'Signals, trades, and logs will appear here',
-                          style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                          style: TextStyle(
+                              color: AppColors.textFaint, fontSize: 12),
                         ),
                       ],
                     ),
@@ -662,21 +685,23 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
                       final time =
                           '${entry.time.hour.toString().padLeft(2, "0")}:${entry.time.minute.toString().padLeft(2, "0")}:${entry.time.second.toString().padLeft(2, "0")}';
                       return Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 3),
+                        padding: const EdgeInsets.symmetric(vertical: 4),
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Icon(entry.icon, size: 16, color: entry.color),
+                            Icon(entry.icon, size: 14, color: entry.color),
                             const SizedBox(width: 8),
                             Text(time,
-                                style: TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.grey.shade500,
-                                    fontFamily: 'monospace')),
-                            const SizedBox(width: 8),
+                                style: const TextStyle(
+                                    fontSize: 10.5,
+                                    color: AppColors.textFaint,
+                                    fontFeatures: [
+                                      FontFeature.tabularFigures()
+                                    ])),
+                            const SizedBox(width: 10),
                             Expanded(
                               child: Text(entry.message,
-                                  style: const TextStyle(fontSize: 12),
+                                  style: const TextStyle(fontSize: 12.5),
                                   maxLines: 2,
                                   overflow: TextOverflow.ellipsis),
                             ),
@@ -705,7 +730,9 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
 
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-      color: Colors.grey.shade100,
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: AppColors.hairline)),
+      ),
       child: Row(
         children: List.generate(phases.length, (i) {
           final phaseIndex = i + 1; // 1-based
@@ -714,10 +741,10 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
           final isUpcoming = _currentPhase < phaseIndex;
 
           final color = isDone
-              ? Colors.green
+              ? AppColors.up
               : isActive
-                  ? Colors.blue
-                  : Colors.grey.shade400;
+                  ? AppColors.accent
+                  : AppColors.textFaint;
 
           return Expanded(
             child: Row(
@@ -726,7 +753,7 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
                   Expanded(
                     child: Container(
                       height: 2,
-                      color: isDone ? Colors.green : Colors.grey.shade300,
+                      color: isDone ? AppColors.up : AppColors.surfaceRaised,
                     ),
                   ),
                 Column(
@@ -738,10 +765,10 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
                         color: isActive
-                            ? Colors.blue.withValues(alpha: 0.15)
+                            ? AppColors.accentDim
                             : isDone
-                                ? Colors.green.withValues(alpha: 0.15)
-                                : Colors.grey.withValues(alpha: 0.08),
+                                ? AppColors.up.withValues(alpha: 0.12)
+                                : AppColors.surface,
                         border: Border.all(color: color, width: isActive ? 2 : 1),
                       ),
                       child: Icon(
@@ -756,7 +783,7 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
                       style: TextStyle(
                         fontSize: 9,
                         fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
-                        color: isUpcoming ? Colors.grey : color,
+                        color: isUpcoming ? AppColors.textFaint : color,
                       ),
                     ),
                   ],
@@ -765,7 +792,9 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
                   Expanded(
                     child: Container(
                       height: 2,
-                      color: _currentPhase > phaseIndex ? Colors.green : Colors.grey.shade300,
+                      color: _currentPhase > phaseIndex
+                          ? AppColors.up
+                          : AppColors.surfaceRaised,
                     ),
                   ),
               ],
@@ -780,7 +809,7 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
 
   Widget _buildCandidateCard(_CandidateInfo c) {
     final isTraded = c.status == 'Traded';
-    final color = isTraded ? Colors.green : Colors.orange;
+    final color = isTraded ? AppColors.up : AppColors.accent;
     final time = '${c.time.hour.toString().padLeft(2, "0")}:${c.time.minute.toString().padLeft(2, "0")}';
 
     return Container(
@@ -788,9 +817,13 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
       margin: const EdgeInsets.only(right: 8),
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withValues(alpha: 0.3)),
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isTraded
+              ? AppColors.hairline
+              : AppColors.accent.withValues(alpha: 0.4),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -799,47 +832,195 @@ class _StrategyDashboardScreenState extends State<StrategyDashboardScreen>
           Row(
             children: [
               Icon(isTraded ? Icons.check_circle : Icons.candlestick_chart,
-                  size: 14, color: color),
+                  size: 13, color: color),
               const SizedBox(width: 4),
               Expanded(
                 child: Text(c.symbol,
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w600, fontSize: 12),
                     overflow: TextOverflow.ellipsis),
               ),
             ],
           ),
           const SizedBox(height: 3),
           Text('Break ▲${c.entryPrice.toStringAsFixed(1)}',
-              style: const TextStyle(fontSize: 10, color: Colors.grey)),
+              style: const TextStyle(
+                  fontSize: 10,
+                  color: AppColors.textMuted,
+                  fontFeatures: [FontFeature.tabularFigures()])),
           Text('SL: ${c.stopLoss.toStringAsFixed(1)}',
-              style: const TextStyle(fontSize: 10, color: Colors.grey)),
+              style: const TextStyle(
+                  fontSize: 10,
+                  color: AppColors.textMuted,
+                  fontFeatures: [FontFeature.tabularFigures()])),
           Text(
             '$time  ${c.status}',
-            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: color),
+            style: TextStyle(
+                fontSize: 10, fontWeight: FontWeight.w600, color: color),
           ),
         ],
       ),
     );
   }
 
-  Widget _infoChip(String label, String value, Color color) {
+  Widget _infoChip(String label, String value, Color valueColor) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 8),
+        padding: const EdgeInsets.symmetric(vertical: 10),
         decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(8),
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(10),
         ),
         child: Column(
           children: [
             Text(label,
-                style: const TextStyle(fontSize: 10, color: Colors.grey)),
-            const SizedBox(height: 2),
+                style: const TextStyle(
+                    fontSize: 10, color: AppColors.textMuted)),
+            const SizedBox(height: 3),
             Text(value,
                 style: TextStyle(
-                    fontSize: 14, fontWeight: FontWeight.bold, color: color)),
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                    color: valueColor)),
           ],
         ),
+      ),
+    );
+  }
+
+  // ── Position cards ───────────────────────────────────────────────────
+
+  Widget _sessionTradeCard(StrategySessionTrade t) {
+    final open = t.isOpen;
+    final pnlColor = t.pnl > 0
+        ? AppColors.up
+        : t.pnl < 0
+            ? AppColors.down
+            : AppColors.textMuted;
+    final statusLabel = switch (t.status) {
+      'sl_hit' => 'SL HIT',
+      'target_hit' => 'TARGET',
+      'eod_exit' => 'EOD EXIT',
+      _ => 'OPEN',
+    };
+    final hm =
+        '${t.entryTime.hour.toString().padLeft(2, '0')}:${t.entryTime.minute.toString().padLeft(2, '0')}';
+
+    return Container(
+      width: 172,
+      margin: const EdgeInsets.only(right: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: open
+              ? AppColors.accent.withValues(alpha: 0.45)
+              : AppColors.hairline,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(t.symbol,
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w600, fontSize: 13),
+                    overflow: TextOverflow.ellipsis),
+              ),
+              if (open)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: AppColors.accentDim,
+                    borderRadius: BorderRadius.circular(5),
+                  ),
+                  child: const Text('OPEN',
+                      style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.8,
+                          color: AppColors.accent)),
+                )
+              else
+                Text(
+                  '${t.pnl >= 0 ? '+' : '-'}₹${AppFmt.inr(t.pnl.abs())}',
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                      color: pnlColor),
+                ),
+            ],
+          ),
+          Text('BUY ${t.quantity} @ ${AppFmt.inr(t.entryPrice)}',
+              style: const TextStyle(
+                  fontSize: 11,
+                  color: AppColors.textMuted,
+                  fontFeatures: [FontFeature.tabularFigures()])),
+          Text(
+            open
+                ? 'SL ${AppFmt.inr(t.stopLoss)} · since $hm'
+                : '$statusLabel @ ${AppFmt.inr(t.exitPrice)}',
+            style: const TextStyle(
+                fontSize: 10.5,
+                color: AppColors.textFaint,
+                fontFeatures: [FontFeature.tabularFigures()]),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _storedTradeCard(StrategyTradeModel trade) {
+    final pnlColor = trade.pnl > 0
+        ? AppColors.up
+        : trade.pnl < 0
+            ? AppColors.down
+            : AppColors.textMuted;
+    return Container(
+      width: 172,
+      margin: const EdgeInsets.only(right: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(trade.symbol,
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w600, fontSize: 13),
+                    overflow: TextOverflow.ellipsis),
+              ),
+              Text(
+                '${trade.pnl >= 0 ? '+' : '-'}₹${AppFmt.inr(trade.pnl.abs())}',
+                style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                    color: pnlColor),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text('Qty ${trade.quantity} @ ${AppFmt.inr(trade.entryPrice)}',
+              style: const TextStyle(
+                  fontSize: 11,
+                  color: AppColors.textMuted,
+                  fontFeatures: [FontFeature.tabularFigures()])),
+        ],
       ),
     );
   }
