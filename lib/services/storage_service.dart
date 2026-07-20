@@ -343,6 +343,17 @@ class StorageService {
     return prefs.getString(_keyTradingMode) ?? 'paper';
   }
 
+  // ── Watchlist sort mode (home screen) ───────────────────────────────
+  static Future<void> saveSortMode(String mode) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('ltp_sort_mode', mode);
+  }
+
+  static Future<String?> loadSortMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('ltp_sort_mode');
+  }
+
   // ── Paper Trading ───────────────────────────────────────────────────
   static Future<void> savePaperPositions(
       List<PaperPositionModel> positions) async {

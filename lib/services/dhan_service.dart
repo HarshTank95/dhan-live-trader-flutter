@@ -88,12 +88,23 @@ class DhanService {
     return grouped;
   }
 
-  // ── Load yesterday's close once at startup ───────────────────────────
+  /// Feed-authoritative prev-close (WebSocket code-6 packet). Always
+  /// overwrites — the exchange's own value is ground truth. The candle-derived
+  /// [loadPrevCloses] below is only the cold-start fallback for the window
+  /// before the feed has delivered (and its clock-based session inference is
+  /// superseded per-stock the moment a feed packet arrives).
+  void updatePrevClose(int securityId, double close) {
+    if (close > 0) _prevCloses[securityId] = close;
+  }
+
+  // ── Cold-start fallback: derive prev-close from daily candles ────────────
   Future<void> loadPrevCloses() async {
     if (_watchlist.isEmpty) return;
 
-    final toDate = DateTime.now().subtract(const Duration(days: 1));
-    final fromDate = DateTime.now().subtract(const Duration(days: 7));
+    // Fetch through tomorrow so today's completed bar is included post-close;
+    // _fetchDayClose picks the correct reference session from the result.
+    final toDate = DateTime.now().add(const Duration(days: 1));
+    final fromDate = DateTime.now().subtract(const Duration(days: 10));
 
     for (final stock in _watchlist) {
       if (_prevCloses.containsKey(stock.securityId)) continue;
@@ -216,7 +227,48 @@ class DhanService {
     final json = jsonDecode(response.body);
     final closes = json['close'] as List<dynamic>?;
     if (closes == null || closes.isEmpty) return 0;
-    return (closes.last as num).toDouble();
+    if (closes.length == 1) return (closes.last as num).toDouble();
+
+    // The day-change reference is the close of the session BEFORE the one
+    // that produced the current LTP (matching the WebSocket prev-close packet
+    // and broker-app convention). Three cases, verified against live data:
+    //  1. Today's bar IS in the response (published) → reference = the bar
+    //     before it.
+    //  2. Today's session has started (weekday, ≥09:15 IST) but today's bar
+    //     is NOT yet published — Dhan publishes the daily bar with a delay
+    //     after close, and intraday the forming bar is absent — → the last
+    //     published bar IS the previous session → reference = last bar.
+    //  3. Today has no session yet (weekend / pre-open morning) → the LTP is
+    //     the last bar's own close → reference = the bar before it.
+    // (Original bug: always taking closes.last → 0.00 change off-hours.
+    //  First fix attempt collapsed cases 2+3 → off-by-one-session evenings.)
+    // Known small gap: on a weekday NSE holiday, case 2 fires wrongly and
+    // shows 0.00 after a manual refresh — the feed path stays correct.
+    final timestamps = json['timestamp'] as List<dynamic>?;
+    final nowIst =
+        DateTime.now().toUtc().add(const Duration(hours: 5, minutes: 30));
+    bool lastBarIsToday = false;
+    if (timestamps != null && timestamps.length == closes.length) {
+      final lastBar = DateTime.fromMillisecondsSinceEpoch(
+              ((timestamps.last as num) * 1000).round(),
+              isUtc: true)
+          .add(const Duration(hours: 5, minutes: 30));
+      lastBarIsToday = lastBar.year == nowIst.year &&
+          lastBar.month == nowIst.month &&
+          lastBar.day == nowIst.day;
+    }
+    final sessionStartedToday = nowIst.weekday != DateTime.saturday &&
+        nowIst.weekday != DateTime.sunday &&
+        (nowIst.hour * 60 + nowIst.minute) >= 9 * 60 + 15;
+    final int idx;
+    if (lastBarIsToday) {
+      idx = closes.length - 2; // case 1
+    } else if (sessionStartedToday) {
+      idx = closes.length - 1; // case 2
+    } else {
+      idx = closes.length - 2; // case 3
+    }
+    return (closes[idx] as num).toDouble();
   }
 
   // ── Intraday candles (for a specific date, minute intervals) ────────

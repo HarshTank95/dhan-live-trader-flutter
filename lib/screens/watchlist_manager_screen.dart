@@ -138,10 +138,19 @@ class _WatchlistManagerScreenState extends State<WatchlistManagerScreen> {
       ),
       body: _watchlists.isEmpty
           ? const Center(child: Text('No watchlists yet. Create one!'))
-          : ListView.separated(
+          : ReorderableListView.builder(
               padding: const EdgeInsets.only(bottom: 80),
               itemCount: _watchlists.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
+              buildDefaultDragHandles: false,
+              onReorder: (oldIndex, newIndex) {
+                setState(() {
+                  if (newIndex > oldIndex) newIndex--;
+                  final wl = _watchlists.removeAt(oldIndex);
+                  _watchlists.insert(newIndex, wl);
+                });
+                // Persist immediately — reordering shouldn't depend on Done.
+                StorageService.saveAllWatchlists(_watchlists);
+              },
               itemBuilder: (context, index) {
                 final wl = _watchlists[index];
                 final isActive = wl.id == _activeId;
@@ -223,6 +232,14 @@ class _WatchlistManagerScreenState extends State<WatchlistManagerScreen> {
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        ReorderableDragStartListener(
+                          index: index,
+                          child: const Padding(
+                            padding: EdgeInsets.only(right: 8),
+                            child:
+                                Icon(Icons.drag_indicator, color: Colors.grey),
+                          ),
+                        ),
                         if (isActive)
                           Container(
                             padding: const EdgeInsets.symmetric(

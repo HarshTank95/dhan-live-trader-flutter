@@ -20,7 +20,7 @@ import 'strategy_list_screen.dart';
 import 'token_entry_screen.dart';
 import 'watchlist_manager_screen.dart';
 
-enum SortMode { changeDesc, changeAsc, nameAsc }
+enum SortMode { custom, changeDesc, changeAsc, nameAsc }
 
 class LtpScreen extends StatefulWidget {
   final String clientId;
@@ -49,7 +49,9 @@ class _LtpScreenState extends State<LtpScreen> {
   bool _isAuthError = false;
   bool _isNetworkError = false;
   bool _isRateLimitError = false;
-  SortMode _sortMode = SortMode.changeDesc;
+  // Default = the user's own arrangement (watchlist stockIds order, editable
+  // via Manage Watchlists → drag handles) — matching broker-app behavior.
+  SortMode _sortMode = SortMode.custom;
 
   // WebSocket live feed
   DhanFeedService? _feedService;
@@ -92,10 +94,13 @@ class _LtpScreenState extends State<LtpScreen> {
   }
 
   Future<void> _init() async {
-    // Step 1: Load all watchlists + active ID
+    // Step 1: Load all watchlists + active ID + saved sort preference
     _watchlists = await StorageService.loadAllWatchlists();
     final savedActiveId = await StorageService.loadActiveWatchlistId();
     _activeWatchlistId = savedActiveId ?? _watchlists.first.id;
+    final savedSort = await StorageService.loadSortMode();
+    _sortMode = SortMode.values.firstWhere((m) => m.name == savedSort,
+        orElse: () => SortMode.custom);
 
     // Step 2: Download/cache scrip master (NSE_EQ only via auth endpoint)
     await _scripService.loadScrips(
@@ -152,6 +157,14 @@ class _LtpScreenState extends State<LtpScreen> {
   }
 
   void _updateFromFeed(Map<int, FeedUpdate> data) {
+    // Feed prev-close packets are the authoritative day-change reference —
+    // mirror them into DhanService so REST refreshes (pull-to-refresh)
+    // compute against the exact same values instead of re-deriving them
+    // from daily candles.
+    for (final e in data.entries) {
+      _service.updatePrevClose(e.key, e.value.prevClose);
+    }
+
     final wl = _activeWatchlist;
     if (wl == null) return;
 
@@ -278,6 +291,8 @@ class _LtpScreenState extends State<LtpScreen> {
   List<StockQuote> _sorted(List<StockQuote> quotes) {
     final list = List<StockQuote>.from(quotes);
     switch (_sortMode) {
+      case SortMode.custom:
+        break; // keep the watchlist's own stockIds order
       case SortMode.changeDesc:
         list.sort((a, b) => b.changePercent.compareTo(a.changePercent));
       case SortMode.changeAsc:
@@ -293,6 +308,9 @@ class _LtpScreenState extends State<LtpScreen> {
       _sortMode = mode;
       _quotes = _sorted(_quotes);
     });
+    unawaited(StorageService.saveSortMode(mode.name));
+    // Custom order sorts by stockIds sequence — refetch restores natural order.
+    if (mode == SortMode.custom) unawaited(_fetchLTP());
   }
 
   Future<void> _openWatchlistManager({bool fromDrawer = true}) async {
@@ -913,6 +931,16 @@ class _LtpScreenState extends State<LtpScreen> {
                   tooltip: 'Sort',
                   onSelected: _setSort,
                   itemBuilder: (_) => [
+                    PopupMenuItem(
+                      value: SortMode.custom,
+                      child: Row(children: [
+                        Icon(Icons.drag_indicator,
+                            color: _sortMode == SortMode.custom
+                                ? AppColors.accent : null, size: 18),
+                        const SizedBox(width: 8),
+                        const Text('My order (as arranged)'),
+                      ]),
+                    ),
                     PopupMenuItem(
                       value: SortMode.changeDesc,
                       child: Row(children: [
